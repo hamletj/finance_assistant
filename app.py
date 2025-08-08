@@ -18,28 +18,21 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 FUNCTIONS = [
     {
         "name": "finance_tool",
-        "description": "Fetch financial data, plot, and/or summarize in one call.",
+        "description": "Fetch financial data and plot in one call.",
         "parameters": {
             "type": "object",
             "properties": {
                 "ticker": {"type": "string", "description": "Stock ticker, e.g., AAPL"},
-                "action": {
-                    "type": "string",
-                    "enum": ["data", "plot", "summarize", "both"],
-                    "description": "What to do: get raw data, plot chart, summarize trend, or both."
-                },
                 "period": {"type": "string", "description": "e.g., '1mo', '3mo', '1y'"},
                 "interval": {"type": "string", "description": "e.g., '1d', '1wk'"}
             },
-            "required": ["ticker", "action"]
+            "required": ["ticker"]
         }
     }
 ]
 
 SYSTEM_PROMPT = (
     "You are a finance assistant. Use finance_tool to fulfill requests. "
-    "Choose the correct action: 'data' for just data, 'plot' for just a chart, "
-    "'summarize' for text trend, 'both' for summary and plot."
 )
 
 def run_agent(user_input):

@@ -3,7 +3,7 @@ import streamlit as st
 import os
 import json
 from openai import OpenAI
-from tools import finance_tool
+from tools import moving_average_tool, past_history_tool
 
 st.set_page_config(page_title="Finance AI Assistant", page_icon="💹")
 

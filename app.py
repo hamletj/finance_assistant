@@ -52,7 +52,7 @@ FUNCTIONS = [
 ]
 
 SYSTEM_PROMPT = (
-    "You are a finance assistant. Use finance_tool to fulfill requests. "
+    "You are a finance assistant. Select tools to fulfill requests. "
 )
 
 def run_agent(user_input):
@@ -61,22 +61,51 @@ def run_agent(user_input):
         {"role": "user", "content": user_input}
     ]
 
-    # Step 1 — let the LLM decide
+    # 1) Register your tools in a simple mapping
+    tool_registry = {
+        "finance_tool": finance_tool,
+        "moving_average_tool": moving_average_tool,
+        # add more tools here later...
+    }
+
+    # 2) Call the model and dispatch to the selected function
     resp = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=messages,
-        functions=FUNCTIONS,
+        functions=FUNCTIONS,      # your updated FUNCTIONS list
         function_call="auto"
     )
 
     message = resp.choices[0].message
 
-    if message.function_call:
-        args = json.loads(message.function_call.arguments)
-        tool_result = finance_tool(**args)
+    if getattr(message, "function_call", None):
+        name = message.function_call.name
+        raw_args = message.function_call.arguments or "{}"
+
+        # Be defensive about JSON parsing
+        try:
+            args = json.loads(raw_args)
+        except json.JSONDecodeError:
+            return {"text": f"Could not parse tool arguments for {name}: {raw_args}", "image_path": None}
+
+        # Route to the correct tool
+        tool_fn = tool_registry.get(name)
+        if tool_fn is None:
+            return {"text": f"Unknown tool requested: {name}", "image_path": None}
+
+        try:
+            tool_result = tool_fn(**args)
+        except TypeError as e:
+            # bad / missing args
+            return {"text": f"Invalid arguments for {name}: {e}", "image_path": None}
+        except Exception as e:
+            # tool runtime error
+            return {"text": f"Error running {name}: {e}", "image_path": None}
+
         return tool_result
-    else:
-        return {"text": message.content, "image_path": None}
+
+    # 3) No tool call: just return the model’s text
+    return {"text": (message.content or "").strip(), "image_path": None}
 
 # --- Streamlit UI ---
 st.title("💹 Finance AI Assistant — One Tool Version")

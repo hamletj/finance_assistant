@@ -11,6 +11,7 @@ import requests
 from bs4 import BeautifulSoup
 from typing import List, Dict, Optional
 
+
 def general_search_tool(
     query: str,
     max_results: int = 5,

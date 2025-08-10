@@ -17,14 +17,34 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 # Define the one tool for the LLM
 FUNCTIONS = [
     {
-        "name": "finance_tool",
-        "description": "Fetch financial data and plot in one call.",
+        "name": "past_history_tool",
+        "description": "Fetch financial data and plot closing prices.",
         "parameters": {
             "type": "object",
             "properties": {
                 "ticker": {"type": "string", "description": "Stock ticker, e.g., AAPL"},
                 "period": {"type": "string", "description": "e.g., '1mo', '3mo', '1y'"},
                 "interval": {"type": "string", "description": "e.g., '1d', '1wk'"}
+            },
+            "required": ["ticker"]
+        }
+    },
+    {
+        "name": "moving_average_tool",
+        "description": "Fetch data and plot Close with one or more simple moving averages (SMA).",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "ticker":   {"type": "string", "description": "Stock ticker, e.g., AAPL"},
+                "period":   {"type": "string", "description": "e.g., '1mo', '3mo', '1y'"},
+                "interval": {"type": "string", "description": "e.g., '1d', '1wk', '1h'"},
+                "windows":  {
+                    "type": "array",
+                    "description": "SMA window sizes in periods (integers > 1), e.g., [5, 20, 50].",
+                    "items": {"type": "integer", "minimum": 2},
+                    "minItems": 1,
+                    "default": [20]
+                }
             },
             "required": ["ticker"]
         }

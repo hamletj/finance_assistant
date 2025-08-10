@@ -3,7 +3,7 @@ import streamlit as st
 import os
 import json
 from openai import OpenAI
-from tools import moving_average_tool, past_history_tool
+from tools import moving_average_tool, past_history_tool, general_search_tool
 
 st.set_page_config(page_title="Finance AI Assistant", page_icon="💹")
 
@@ -48,6 +48,22 @@ FUNCTIONS = [
             },
             "required": ["ticker"]
         }
+    },
+    {
+        "name": "general_search_tool",
+        "description": "General-purpose web search (DuckDuckGo by default; supports Tavily/SerpAPI).",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query":      {"type": "string", "description": "Search query, e.g., 'best python logging practices'"},
+                "max_results":{"type": "integer", "description": "Number of results", "default": 5, "minimum": 1},
+                "backend":    {"type": "string", "description": "duckduckgo | tavily | serpapi", "default": "duckduckgo"},
+                "api_key":    {"type": "string", "description": "API key for Tavily/SerpAPI (ignored for duckduckgo)"},
+                "locale":     {"type": "string", "description": "Locale like 'en-US'", "default": "en-US"},
+                "region":     {"type": "string", "description": "Region like 'us'", "default": "us"}
+            },
+            "required": ["query"]
+        }
     }
 ]
 
@@ -65,6 +81,8 @@ def run_agent(user_input):
     tool_registry = {
         "past_history_tool": past_history_tool,
         "moving_average_tool": moving_average_tool,
+        "general_search_tool": general_search_tool
+
         # add more tools here later...
     }
 

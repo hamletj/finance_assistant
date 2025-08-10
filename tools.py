@@ -7,6 +7,116 @@ import os
 import re
 from datetime import datetime, timezone, timedelta
 from pandas.tseries.offsets import DateOffset
+import requests
+from bs4 import BeautifulSoup
+from typing import List, Dict, Optional
+
+def general_search_tool(
+    query: str,
+    max_results: int = 5,
+    backend: str = "duckduckgo",   # "duckduckgo" (no key), "tavily", or "serpapi"
+    api_key: Optional[str] = None,
+    locale: str = "en-US",
+    region: str = "us"
+) -> Dict:
+    """
+    Perform a general-purpose web search and return top results.
+
+    Returns:
+        dict: {
+          "text": str,
+          "results": [{"title": str, "url": str, "snippet": str}],
+          "image_path": None
+        }
+    """
+    query = (query or "").strip()
+    if not query:
+        return {"text": "Please provide a non-empty search query.", "results": [], "image_path": None}
+
+    backend = backend.lower()
+    try:
+        if backend == "tavily":
+            if not api_key:
+                return {"text": "Tavily requires api_key.", "results": [], "image_path": None}
+            # Docs: https://docs.tavily.com/
+            resp = requests.post(
+                "https://api.tavily.com/search",
+                json={"api_key": api_key, "query": query, "max_results": max_results},
+                timeout=12,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            out = []
+            for r in (data.get("results") or [])[:max_results]:
+                out.append({"title": r.get("title"), "url": r.get("url"), "snippet": (r.get("content") or "").strip()})
+            text = f"Found {len(out)} result(s) with Tavily."
+            return {"text": text, "results": out, "image_path": None}
+
+        elif backend == "serpapi":
+            if not api_key:
+                return {"text": "SerpAPI requires api_key.", "results": [], "image_path": None}
+            # Docs: https://serpapi.com/
+            params = {
+                "engine": "google",
+                "q": query,
+                "num": max_results,
+                "hl": locale.split("-")[0],
+                "gl": region.upper(),
+                "api_key": api_key,
+            }
+            resp = requests.get("https://serpapi.com/search", params=params, timeout=12)
+            resp.raise_for_status()
+            data = resp.json()
+            organic = data.get("organic_results", [])[:max_results]
+            out = []
+            for r in organic:
+                out.append({"title": r.get("title"), "url": r.get("link"), "snippet": (r.get("snippet") or "").strip()})
+            text = f"Found {len(out)} result(s) with SerpAPI."
+            return {"text": text, "results": out, "image_path": None}
+
+        else:
+            # ---- Default: DuckDuckGo HTML (no API key) ----
+            # We use their HTML endpoint to avoid JS; structure is reasonably stable.
+            # Be polite with headers & timeout.
+            headers = {
+                "User-Agent": "Mozilla/5.0 (compatible; GeneralSearchTool/1.0; +https://example.com/bot)"
+            }
+            # DDG “html” endpoint prefers POST with form data
+            resp = requests.post(
+                "https://html.duckduckgo.com/html/",
+                data={"q": query, "kl": region, "k1": "-1"},  # k1=-1: no safe search tweak; adjust as you like
+                headers=headers,
+                timeout=12,
+            )
+            resp.raise_for_status()
+            soup = BeautifulSoup(resp.text, "html.parser")
+
+            results = []
+            # Results live under .result; link in a.result__a; snippet in .result__snippet
+            for res in soup.select("div.result"):
+                a = res.select_one("a.result__a")
+                if not a:
+                    continue
+                title = a.get_text(" ", strip=True)
+                url = a.get("href")
+                snippet_el = res.select_one(".result__snippet") or res.select_one(".result__snippet.js-result-snippet")
+                snippet = snippet_el.get_text(" ", strip=True) if snippet_el else ""
+                if title and url:
+                    results.append({"title": title, "url": url, "snippet": snippet})
+                if len(results) >= max_results:
+                    break
+
+            return {
+                "text": f"Found {len(results)} result(s) with DuckDuckGo.",
+                "results": results,
+                "image_path": None,
+            }
+
+    except requests.RequestException as e:
+        return {"text": f"Search failed: network error: {e}", "results": [], "image_path": None}
+    except Exception as e:
+        return {"text": f"Search failed: {e}", "results": [], "image_path": None}
+
 
 def _parse_period_to_offset(period: str) -> DateOffset:
     """

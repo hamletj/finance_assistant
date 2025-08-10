@@ -63,7 +63,7 @@ def run_agent(user_input):
 
     # 1) Register your tools in a simple mapping
     tool_registry = {
-        "finance_tool": finance_tool,
+        "past_history_tool": past_history_tool,
         "moving_average_tool": moving_average_tool,
         # add more tools here later...
     }

@@ -8,115 +8,140 @@ import re
 from datetime import datetime, timezone, timedelta
 from pandas.tseries.offsets import DateOffset
 import requests
-from bs4 import BeautifulSoup
 from typing import List, Dict, Optional
+import time, html
+from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
+from bs4 import BeautifulSoup
 
+try:
+    # OpenAI Python SDK v1 style
+    from openai import OpenAI
+except ImportError:
+    OpenAI = None
 
-def general_search_tool(
+def finance_news_digest_tool(
     query: str,
-    max_results: int = 5,
-    backend: str = "duckduckgo",   # "duckduckgo" (no key), "tavily", or "serpapi"
-    api_key: Optional[str] = None,
-    locale: str = "en-US",
-    region: str = "us"
+    top_n: int = 5,
+    max_articles_chars: int = 18000,
 ) -> Dict:
     """
-    Perform a general-purpose web search and return top results.
-
-    Returns:
-        dict: {
-          "text": str,
-          "results": [{"title": str, "url": str, "snippet": str}],
-          "image_path": None
-        }
+    Self-contained: searches Yahoo Finance news for `query`, fetches top articles,
+    extracts text, and summarizes with GPT. Requires OPENAI_API_KEY in env.
+    Returns: {'text': str, 'sources': List[...], 'image_path': None}
     """
-    query = (query or "").strip()
-    if not query:
-        return {"text": "Please provide a non-empty search query.", "results": [], "image_path": None}
 
-    backend = backend.lower()
+    def _clean_url(u: str) -> str:
+        try:
+            p = urlparse(u)
+            q = [(k, v) for k, v in parse_qsl(p.query, keep_blank_values=True)
+                 if not k.lower().startswith("utm_")]
+            return urlunparse(p._replace(query=urlencode(q)))
+        except Exception:
+            return u
+
+    def _extract_article_text(url: str, timeout: int = 12) -> str:
+        headers = {"User-Agent": "Mozilla/5.0 (compatible; FinanceNewsDigest/1.0)"}
+        r = requests.get(url, headers=headers, timeout=timeout)
+        r.raise_for_status()
+        soup = BeautifulSoup(r.text, "html.parser")
+        # Try common article containers
+        selectors = [
+            "article",
+            "[itemprop='articleBody']",
+            ".article-content", ".post-content", ".story-body", ".entry-content",
+            ".meteredContent", ".paywall"
+        ]
+        for sel in selectors:
+            el = soup.select_one(sel)
+            if el and el.get_text(strip=True):
+                ps = el.find_all(["p","h2","li"])
+                text = "\n".join(p.get_text(" ", strip=True) for p in ps) or el.get_text(" ", strip=True)
+                if len(text) > 400:
+                    return text.strip()
+        # Fallback: all <p>
+        ps = soup.find_all("p")
+        return "\n".join(p.get_text(" ", strip=True) for p in ps).strip()
+
+    # 1) Search Yahoo Finance news
+    q = (query or "").strip()
+    if not q:
+        return {"text": "Please provide a non-empty query.", "sources": [], "image_path": None}
+
+    url = "https://query1.finance.yahoo.com/v1/finance/search"
+    params = {"q": q, "quotesCount": 0, "newsCount": max(1, int(top_n)), "region": "US", "lang": "en-US"}
     try:
-        if backend == "tavily":
-            if not api_key:
-                return {"text": "Tavily requires api_key.", "results": [], "image_path": None}
-            # Docs: https://docs.tavily.com/
-            resp = requests.post(
-                "https://api.tavily.com/search",
-                json={"api_key": api_key, "query": query, "max_results": max_results},
-                timeout=12,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            out = []
-            for r in (data.get("results") or [])[:max_results]:
-                out.append({"title": r.get("title"), "url": r.get("url"), "snippet": (r.get("content") or "").strip()})
-            text = f"Found {len(out)} result(s) with Tavily."
-            return {"text": text, "results": out, "image_path": None}
-
-        elif backend == "serpapi":
-            if not api_key:
-                return {"text": "SerpAPI requires api_key.", "results": [], "image_path": None}
-            # Docs: https://serpapi.com/
-            params = {
-                "engine": "google",
-                "q": query,
-                "num": max_results,
-                "hl": locale.split("-")[0],
-                "gl": region.upper(),
-                "api_key": api_key,
-            }
-            resp = requests.get("https://serpapi.com/search", params=params, timeout=12)
-            resp.raise_for_status()
-            data = resp.json()
-            organic = data.get("organic_results", [])[:max_results]
-            out = []
-            for r in organic:
-                out.append({"title": r.get("title"), "url": r.get("link"), "snippet": (r.get("snippet") or "").strip()})
-            text = f"Found {len(out)} result(s) with SerpAPI."
-            return {"text": text, "results": out, "image_path": None}
-
-        else:
-            # ---- Default: DuckDuckGo HTML (no API key) ----
-            # We use their HTML endpoint to avoid JS; structure is reasonably stable.
-            # Be polite with headers & timeout.
-            headers = {
-                "User-Agent": "Mozilla/5.0 (compatible; GeneralSearchTool/1.0; +https://example.com/bot)"
-            }
-            # DDG “html” endpoint prefers POST with form data
-            resp = requests.post(
-                "https://html.duckduckgo.com/html/",
-                data={"q": query, "kl": region, "k1": "-1"},  # k1=-1: no safe search tweak; adjust as you like
-                headers=headers,
-                timeout=12,
-            )
-            resp.raise_for_status()
-            soup = BeautifulSoup(resp.text, "html.parser")
-
-            results = []
-            # Results live under .result; link in a.result__a; snippet in .result__snippet
-            for res in soup.select("div.result"):
-                a = res.select_one("a.result__a")
-                if not a:
-                    continue
-                title = a.get_text(" ", strip=True)
-                url = a.get("href")
-                snippet_el = res.select_one(".result__snippet") or res.select_one(".result__snippet.js-result-snippet")
-                snippet = snippet_el.get_text(" ", strip=True) if snippet_el else ""
-                if title and url:
-                    results.append({"title": title, "url": url, "snippet": snippet})
-                if len(results) >= max_results:
-                    break
-
-            return {
-                "text": f"Found {len(results)} result(s) with DuckDuckGo.",
-                "results": results,
-                "image_path": None,
-            }
-
-    except requests.RequestException as e:
-        return {"text": f"Search failed: network error: {e}", "results": [], "image_path": None}
+        r = requests.get(url, params=params, timeout=12)
+        r.raise_for_status()
+        data = r.json()
+        news = data.get("news", []) or []
+        hits = [{
+            "title": n.get("title"),
+            "publisher": n.get("publisher"),
+            "link": _clean_url(n.get("link") or ""),
+            "time": n.get("providerPublishTime")
+        } for n in news[:top_n]]
     except Exception as e:
-        return {"text": f"Search failed: {e}", "results": [], "image_path": None}
+        return {"text": f"Yahoo Finance news search failed: {e}", "sources": [], "image_path": None}
+
+    # 2) Fetch & extract article text
+    articles, total_chars = [], 0
+    for h in hits:
+        link = h["link"]
+        if not link:
+            continue
+        try:
+            txt = _extract_article_text(link)
+        except Exception:
+            txt = ""
+        if len(txt) < 500:
+            continue
+        if total_chars + len(txt) > max_articles_chars:
+            break
+        articles.append({"title": h["title"], "publisher": h["publisher"], "url": link, "text": txt})
+        total_chars += len(txt)
+        time.sleep(0.35)  # polite pause
+
+    if not articles:
+        return {"text": f"No readable article bodies fetched for '{query}'.", "sources": hits, "image_path": None}
+
+    # 3) Summarize with GPT (self-contained client)
+    if OpenAI is None:
+        return {"text": "OpenAI SDK not installed. `pip install openai`.", "sources": hits, "image_path": None}
+    if not os.getenv("OPENAI_API_KEY"):
+        return {"text": "Missing OPENAI_API_KEY in environment.", "sources": hits, "image_path": None}
+
+    client = OpenAI()
+    system = (
+        "You are a financial news analyst. Produce a concise, neutral brief that integrates multiple sources. "
+        "Quantify key facts and cite sources inline with [n] where n is the article index."
+    )
+    sources_block = "\n\n".join(
+        f"[{i+1}] {a['title']} — {a['publisher']}\nURL: {a['url']}\n---\n{a['text'][:6000]}"
+        for i, a in enumerate(articles)
+    )
+    user = (
+        f"Topic: {query}\n\nSources (truncated content below):\n{sources_block}\n\n"
+        "Write:\n"
+        "- 5–8 bullet executive summary\n"
+        "- What’s new vs background\n"
+        "- Market impact (tickers/sectors) with key numbers\n"
+        "- Risks/unknowns\n"
+        "- One-sentence takeaway\n"
+        "Keep ~300 words. Use [n] to cite."
+    )
+
+    resp = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role":"system","content":system},{"role":"user","content":user}],
+        temperature=0.3,
+    )
+    summary = (resp.choices[0].message.content or "").strip()
+
+    return {
+        "text": summary,
+        "sources": [{"index": i+1, "title": a["title"], "publisher": a["publisher"], "url": a["url"]} for i, a in enumerate(articles)],
+        "image_path": None
+    }
 
 
 def _parse_period_to_offset(period: str) -> DateOffset:

@@ -3,3 +3,5 @@ openai>=1.0.0
 yfinance
 pandas
 matplotlib
+requests
+beautifulsoup4

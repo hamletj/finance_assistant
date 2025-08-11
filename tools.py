@@ -51,17 +51,18 @@ def _make_session() -> requests.Session:
 def _yahoo_news_search(query: str, count: int = 5, region: str = "US", lang: str = "en-US"):
     """
     Resilient Yahoo Finance news search with retries, backoff, and host fallback.
+    (Minimal changes: switch to news-only endpoint + adjust params/fields.)
     """
     session = _make_session()
     params = {
         "q": query,
-        "quotesCount": 0,
-        "newsCount": max(1, int(count)),
+        "count": max(1, int(count)),   # was newsCount
+        "start": 0,                    # optional; keeps first page
         "region": region,
         "lang": lang,
     }
 
-    # Try both hosts before giving up
+    # Use the news-only endpoints
     hosts = [
         "https://query1.finance.yahoo.com/v1/news/search",
         "https://query2.finance.yahoo.com/v1/news/search",
@@ -70,35 +71,37 @@ def _yahoo_news_search(query: str, count: int = 5, region: str = "US", lang: str
     last_err = None
     for host in hosts:
         try:
-            # jitter to avoid thundering herd
-            time.sleep(random.uniform(0.2, 0.6))
+            time.sleep(random.uniform(0.2, 0.6))  # jitter
             r = session.get(host, params=params, timeout=12)
-            # If 429 and Retry didn’t already backoff enough, respect Retry-After manually
             if r.status_code == 429:
                 retry_after = r.headers.get("Retry-After")
                 if retry_after:
                     try:
                         wait = float(retry_after)
                         time.sleep(wait + random.uniform(0.2, 0.8))
-                        # one more attempt after honoring Retry-After
                         r = session.get(host, params=params, timeout=12)
                     except Exception:
                         pass
             r.raise_for_status()
             data = r.json()
-            news = data.get("news", []) or []
-            return [{
+
+            # news/search often returns under "items"; fall back to "news"
+            raw = data.get("items") or data.get("news") or []
+            items = [{
                 "title": n.get("title"),
                 "publisher": n.get("publisher"),
-                "link": n.get("link"),
-                "time": n.get("providerPublishTime"),
-            } for n in news[:count]]
+                "link": n.get("link") or n.get("url"),
+                "time": n.get("pubDate") or n.get("providerPublishTime"),
+            } for n in raw]
+
+            # newest first if timestamps exist
+            items.sort(key=lambda x: (x["time"] or 0), reverse=True)
+
+            return items[:count]
         except requests.RequestException as e:
             last_err = e
-            # short pause before switching host / failing
             time.sleep(random.uniform(0.5, 1.2))
 
-    # If both hosts failed:
     raise RuntimeError(f"Yahoo Finance news search failed after retries: {last_err}")
 
 

@@ -63,8 +63,8 @@ def _yahoo_news_search(query: str, count: int = 5, region: str = "US", lang: str
 
     # Try both hosts before giving up
     hosts = [
-        "https://query1.finance.yahoo.com/v1/finance/search",
-        "https://query2.finance.yahoo.com/v1/finance/search",
+        "https://query1.finance.yahoo.com/v1/news/search",
+        "https://query2.finance.yahoo.com/v1/news/search",
     ]
 
     last_err = None

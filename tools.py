@@ -12,12 +12,95 @@ from typing import List, Dict, Optional
 import time, html
 from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
 from bs4 import BeautifulSoup
+import random
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 try:
     # OpenAI Python SDK v1 style
     from openai import OpenAI
 except ImportError:
     OpenAI = None
+
+
+
+def _make_session() -> requests.Session:
+    s = requests.Session()
+    # Robust retry policy (handles 429 + common 5xx)
+    retry = Retry(
+        total=6,
+        connect=3,
+        read=3,
+        backoff_factor=0.7,             # exponential backoff: 0.7, 1.4, 2.8, ...
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset(["GET", "POST"]),
+        raise_on_status=False,
+        respect_retry_after_header=True, # honor Retry-After
+    )
+    s.mount("https://", HTTPAdapter(max_retries=retry))
+    s.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) "
+                      "Chrome/125.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://finance.yahoo.com/",
+    })
+    return s
+
+def _yahoo_news_search(query: str, count: int = 5, region: str = "US", lang: str = "en-US"):
+    """
+    Resilient Yahoo Finance news search with retries, backoff, and host fallback.
+    """
+    session = _make_session()
+    params = {
+        "q": query,
+        "quotesCount": 0,
+        "newsCount": max(1, int(count)),
+        "region": region,
+        "lang": lang,
+    }
+
+    # Try both hosts before giving up
+    hosts = [
+        "https://query1.finance.yahoo.com/v1/finance/search",
+        "https://query2.finance.yahoo.com/v1/finance/search",
+    ]
+
+    last_err = None
+    for host in hosts:
+        try:
+            # jitter to avoid thundering herd
+            time.sleep(random.uniform(0.2, 0.6))
+            r = session.get(host, params=params, timeout=12)
+            # If 429 and Retry didn’t already backoff enough, respect Retry-After manually
+            if r.status_code == 429:
+                retry_after = r.headers.get("Retry-After")
+                if retry_after:
+                    try:
+                        wait = float(retry_after)
+                        time.sleep(wait + random.uniform(0.2, 0.8))
+                        # one more attempt after honoring Retry-After
+                        r = session.get(host, params=params, timeout=12)
+                    except Exception:
+                        pass
+            r.raise_for_status()
+            data = r.json()
+            news = data.get("news", []) or []
+            return [{
+                "title": n.get("title"),
+                "publisher": n.get("publisher"),
+                "link": n.get("link"),
+                "time": n.get("providerPublishTime"),
+            } for n in news[:count]]
+        except requests.RequestException as e:
+            last_err = e
+            # short pause before switching host / failing
+            time.sleep(random.uniform(0.5, 1.2))
+
+    # If both hosts failed:
+    raise RuntimeError(f"Yahoo Finance news search failed after retries: {last_err}")
+
 
 def finance_news_digest_tool(
     query: str,
@@ -70,16 +153,7 @@ def finance_news_digest_tool(
     url = "https://query1.finance.yahoo.com/v1/finance/search"
     params = {"q": q, "quotesCount": 0, "newsCount": max(1, int(top_n)), "region": "US", "lang": "en-US"}
     try:
-        r = requests.get(url, params=params, timeout=12)
-        r.raise_for_status()
-        data = r.json()
-        news = data.get("news", []) or []
-        hits = [{
-            "title": n.get("title"),
-            "publisher": n.get("publisher"),
-            "link": _clean_url(n.get("link") or ""),
-            "time": n.get("providerPublishTime")
-        } for n in news[:top_n]]
+        hits = _yahoo_news_search(query, count=top_n)
     except Exception as e:
         return {"text": f"Yahoo Finance news search failed: {e}", "sources": [], "image_path": None}
 

@@ -105,120 +105,120 @@ def _yahoo_news_search(query: str, count: int = 5, region: str = "US", lang: str
     raise RuntimeError(f"Yahoo Finance news search failed after retries: {last_err}")
 
 
-def finance_news_digest_tool(
-    query: str,
-    top_n: int = 5,
-    max_articles_chars: int = 18000,
-) -> Dict:
-    """
-    Self-contained: searches Yahoo Finance news for `query`, fetches top articles,
-    extracts text, and summarizes with GPT. Requires OPENAI_API_KEY in env.
-    Returns: {'text': str, 'sources': List[...], 'image_path': None}
-    """
+# def finance_news_digest_tool(
+#     query: str,
+#     top_n: int = 5,
+#     max_articles_chars: int = 18000,
+# ) -> Dict:
+#     """
+#     Self-contained: searches Yahoo Finance news for `query`, fetches top articles,
+#     extracts text, and summarizes with GPT. Requires OPENAI_API_KEY in env.
+#     Returns: {'text': str, 'sources': List[...], 'image_path': None}
+#     """
 
-    def _clean_url(u: str) -> str:
-        try:
-            p = urlparse(u)
-            q = [(k, v) for k, v in parse_qsl(p.query, keep_blank_values=True)
-                 if not k.lower().startswith("utm_")]
-            return urlunparse(p._replace(query=urlencode(q)))
-        except Exception:
-            return u
+#     def _clean_url(u: str) -> str:
+#         try:
+#             p = urlparse(u)
+#             q = [(k, v) for k, v in parse_qsl(p.query, keep_blank_values=True)
+#                  if not k.lower().startswith("utm_")]
+#             return urlunparse(p._replace(query=urlencode(q)))
+#         except Exception:
+#             return u
 
-    def _extract_article_text(url: str, timeout: int = 12) -> str:
-        headers = {"User-Agent": "Mozilla/5.0 (compatible; FinanceNewsDigest/1.0)"}
-        r = requests.get(url, headers=headers, timeout=timeout)
-        r.raise_for_status()
-        soup = BeautifulSoup(r.text, "html.parser")
-        # Try common article containers
-        selectors = [
-            "article",
-            "[itemprop='articleBody']",
-            ".article-content", ".post-content", ".story-body", ".entry-content",
-            ".meteredContent", ".paywall"
-        ]
-        for sel in selectors:
-            el = soup.select_one(sel)
-            if el and el.get_text(strip=True):
-                ps = el.find_all(["p","h2","li"])
-                text = "\n".join(p.get_text(" ", strip=True) for p in ps) or el.get_text(" ", strip=True)
-                if len(text) > 400:
-                    return text.strip()
-        # Fallback: all <p>
-        ps = soup.find_all("p")
-        return "\n".join(p.get_text(" ", strip=True) for p in ps).strip()
+#     def _extract_article_text(url: str, timeout: int = 12) -> str:
+#         headers = {"User-Agent": "Mozilla/5.0 (compatible; FinanceNewsDigest/1.0)"}
+#         r = requests.get(url, headers=headers, timeout=timeout)
+#         r.raise_for_status()
+#         soup = BeautifulSoup(r.text, "html.parser")
+#         # Try common article containers
+#         selectors = [
+#             "article",
+#             "[itemprop='articleBody']",
+#             ".article-content", ".post-content", ".story-body", ".entry-content",
+#             ".meteredContent", ".paywall"
+#         ]
+#         for sel in selectors:
+#             el = soup.select_one(sel)
+#             if el and el.get_text(strip=True):
+#                 ps = el.find_all(["p","h2","li"])
+#                 text = "\n".join(p.get_text(" ", strip=True) for p in ps) or el.get_text(" ", strip=True)
+#                 if len(text) > 400:
+#                     return text.strip()
+#         # Fallback: all <p>
+#         ps = soup.find_all("p")
+#         return "\n".join(p.get_text(" ", strip=True) for p in ps).strip()
 
-    # 1) Search Yahoo Finance news
-    q = (query or "").strip()
-    if not q:
-        return {"text": "Please provide a non-empty query.", "sources": [], "image_path": None}
+#     # 1) Search Yahoo Finance news
+#     q = (query or "").strip()
+#     if not q:
+#         return {"text": "Please provide a non-empty query.", "sources": [], "image_path": None}
 
-    url = "https://query1.finance.yahoo.com/v1/finance/search"
-    params = {"q": q, "quotesCount": 0, "newsCount": max(1, int(top_n)), "region": "US", "lang": "en-US"}
-    try:
-        hits = _yahoo_news_search(query, count=top_n)
-    except Exception as e:
-        return {"text": f"Yahoo Finance news search failed: {e}", "sources": [], "image_path": None}
+#     url = "https://query1.finance.yahoo.com/v1/finance/search"
+#     params = {"q": q, "quotesCount": 0, "newsCount": max(1, int(top_n)), "region": "US", "lang": "en-US"}
+#     try:
+#         hits = _yahoo_news_search(query, count=top_n)
+#     except Exception as e:
+#         return {"text": f"Yahoo Finance news search failed: {e}", "sources": [], "image_path": None}
 
-    # 2) Fetch & extract article text
-    articles, total_chars = [], 0
-    for h in hits:
-        link = h["link"]
-        if not link:
-            continue
-        try:
-            txt = _extract_article_text(link)
-        except Exception:
-            txt = ""
-        if len(txt) < 500:
-            continue
-        if total_chars + len(txt) > max_articles_chars:
-            break
-        articles.append({"title": h["title"], "publisher": h["publisher"], "url": link, "text": txt})
-        total_chars += len(txt)
-        time.sleep(0.35)  # polite pause
+#     # 2) Fetch & extract article text
+#     articles, total_chars = [], 0
+#     for h in hits:
+#         link = h["link"]
+#         if not link:
+#             continue
+#         try:
+#             txt = _extract_article_text(link)
+#         except Exception:
+#             txt = ""
+#         if len(txt) < 500:
+#             continue
+#         if total_chars + len(txt) > max_articles_chars:
+#             break
+#         articles.append({"title": h["title"], "publisher": h["publisher"], "url": link, "text": txt})
+#         total_chars += len(txt)
+#         time.sleep(0.35)  # polite pause
 
-    if not articles:
-        return {"text": f"No readable article bodies fetched for '{query}'.", "sources": hits, "image_path": None}
+#     if not articles:
+#         return {"text": f"No readable article bodies fetched for '{query}'.", "sources": hits, "image_path": None}
 
-    # 3) Summarize with GPT (self-contained client)
-    if OpenAI is None:
-        return {"text": "OpenAI SDK not installed. `pip install openai`.", "sources": hits, "image_path": None}
-    if not os.getenv("OPENAI_API_KEY"):
-        return {"text": "Missing OPENAI_API_KEY in environment.", "sources": hits, "image_path": None}
+#     # 3) Summarize with GPT (self-contained client)
+#     if OpenAI is None:
+#         return {"text": "OpenAI SDK not installed. `pip install openai`.", "sources": hits, "image_path": None}
+#     if not os.getenv("OPENAI_API_KEY"):
+#         return {"text": "Missing OPENAI_API_KEY in environment.", "sources": hits, "image_path": None}
 
-    client = OpenAI()
-    system = (
-        "You are a financial news analyst. Produce a concise, neutral brief that integrates multiple sources. "
-        "Quantify key facts and cite sources inline with [n] where n is the article index."
-    )
-    sources_block = "\n\n".join(
-        f"[{i+1}] {a['title']} — {a['publisher']}\nURL: {a['url']}\n---\n{a['text'][:6000]}"
-        for i, a in enumerate(articles)
-    )
-    user = (
-        f"Topic: {query}\n\nSources (truncated content below):\n{sources_block}\n\n"
-        "Write:\n"
-        "- 5–8 bullet executive summary\n"
-        "- What’s new vs background\n"
-        "- Market impact (tickers/sectors) with key numbers\n"
-        "- Risks/unknowns\n"
-        "- One-sentence takeaway\n"
-        "Keep ~300 words. Use [n] to cite."
-    )
+#     client = OpenAI()
+#     system = (
+#         "You are a financial news analyst. Produce a concise, neutral brief that integrates multiple sources. "
+#         "Quantify key facts and cite sources inline with [n] where n is the article index."
+#     )
+#     sources_block = "\n\n".join(
+#         f"[{i+1}] {a['title']} — {a['publisher']}\nURL: {a['url']}\n---\n{a['text'][:6000]}"
+#         for i, a in enumerate(articles)
+#     )
+#     user = (
+#         f"Topic: {query}\n\nSources (truncated content below):\n{sources_block}\n\n"
+#         "Write:\n"
+#         "- 5–8 bullet executive summary\n"
+#         "- What’s new vs background\n"
+#         "- Market impact (tickers/sectors) with key numbers\n"
+#         "- Risks/unknowns\n"
+#         "- One-sentence takeaway\n"
+#         "Keep ~300 words. Use [n] to cite."
+#     )
 
-    resp = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role":"system","content":system},{"role":"user","content":user}],
-        temperature=0.3,
-    )
-    summary = (resp.choices[0].message.content or "").strip()
+#     resp = client.chat.completions.create(
+#         model="gpt-4o-mini",
+#         messages=[{"role":"system","content":system},{"role":"user","content":user}],
+#         temperature=0.3,
+#     )
+#     summary = (resp.choices[0].message.content or "").strip()
 
-    return {
-        "text": summary,
-        "sources": [{"index": i+1, "title": a["title"], "publisher": a["publisher"], "url": a["url"]} for i, a in enumerate(articles)],
-        "image_path": None
-    }
+#     return {
+#         "text": summary,
+#         "sources": [{"index": i+1, "title": a["title"], "publisher": a["publisher"], "url": a["url"]} for i, a in enumerate(articles)],
+#         "image_path": None
+#     }
 
 
 def _parse_period_to_offset(period: str) -> DateOffset:
@@ -369,90 +369,6 @@ def moving_average_tool(
     )
     return result
 
-# def moving_average_tool(
-#     ticker: str,
-#     period: str = "1mo",
-#     interval: str = "1d",
-#     windows=(20,),
-# ):
-#     """
-#     Fetch OHLCV data for `ticker` and plot Close with one or more
-#     simple moving averages (SMA). Saves a PNG to a temp folder.
-
-#     Args:
-#         ticker (str): e.g., "AAPL"
-#         period (str): e.g., "1mo", "3mo", "1y"
-#         interval (str): e.g., "1d", "1h", "15m"
-#         windows (Iterable[int]): moving-average window sizes in periods
-
-#     Returns:
-#         dict: {'text': str, 'image_path': str | None}
-#     """
-#     ticker = ticker.strip().upper()
-#     result = {"text": "", "image_path": None}
-
-#     # Validate windows
-#     try:
-#         windows = [int(w) for w in windows if int(w) > 1]
-#         if not windows:
-#             result["text"] = "No valid moving-average windows provided (need integers > 1)."
-#             return result
-#     except Exception:
-#         result["text"] = "Invalid `windows` argument; provide integers > 1."
-#         return result
-
-#     # 1) Fetch data
-#     try:
-#         t = yf.Ticker(ticker)
-#         hist = t.history(period=period, interval=interval)
-#         if hist.empty:
-#             result["text"] = f"No data found for {ticker}."
-#             return result
-#         hist = hist.reset_index()
-#     except Exception as e:
-#         result["text"] = f"Error fetching data for {ticker}: {e}"
-#         return result
-
-#     # 2) Compute SMAs (skip if window longer than dataset)
-#     for w in windows:
-#         if len(hist) >= w:
-#             hist[f"SMA_{w}"] = hist["Close"].rolling(window=w).mean()
-
-#     # 3) Plot
-#     fig, ax = plt.subplots()
-#     ax.plot(hist["Date"], hist["Close"], marker="o", label="Close")
-
-#     plotted_any_ma = False
-#     for w in windows:
-#         col = f"SMA_{w}"
-#         if col in hist:
-#             ax.plot(hist["Date"], hist[col], linewidth=2, label=f"SMA {w}")
-#             plotted_any_ma = True
-
-#     ax.set_title(f"{ticker} Close with Moving Averages")
-#     ax.set_xlabel("Date")
-#     ax.set_ylabel("Price (USD)")
-#     ax.legend(loc="best")
-#     fig.autofmt_xdate()
-
-#     # 4) Save
-#     tmpdir = tempfile.gettempdir()
-#     fname = f"{ticker}_ma_{int(datetime.utcnow().timestamp())}.png"
-#     path = os.path.join(tmpdir, fname)
-#     plt.savefig(path, bbox_inches="tight")
-#     plt.close(fig)
-
-#     result["image_path"] = path
-#     if not plotted_any_ma:
-#         result["text"] = (
-#             "Plot created, but no SMA lines were added because all windows "
-#             "are longer than the number of data points."
-#         )
-#     else:
-#         result["text"] = (
-#             f"Plotted {ticker} Close with SMAs: {', '.join(str(w) for w in windows)}."
-#         )
-#     return result
 
 def past_history_tool(ticker: str,  period: str = "1mo", interval: str = "1d"):
     """

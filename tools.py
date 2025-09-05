@@ -22,6 +22,95 @@ try:
 except ImportError:
     OpenAI = None
 
+def generate_financial_summary_tool(ticker: str, num_quarters: int = 5):
+    """
+    Generate a Tesla-style financial summary:
+      - Metrics as rows, quarters as columns
+      - Columns ordered ascending by date
+      - Only YoY % for the latest quarter
+      - Numbers formatted like Tesla (billions, %, EPS with 2 decimals)
+      - YoY % highlighted with green/red background shading
+    """
+
+    # Load dataset
+    df = pd.read_csv(f"/data/{ticker}.csv")
+
+    # Map dataset columns to financial summary column names
+    column_mapping = {
+        "revenue": "Total Revenues",
+        "grossProfit": "Gross Profit",
+        "grossProfitRatio": "Gross Margin",
+        "operatingIncome": "Income from Operations",
+        "operatingIncomeRatio": "Operating Margin",
+        "netIncome": "GAAP Net Income",
+        "epsdiluted": "EPS Diluted (GAAP)",
+        "ebitda": "Adjusted EBITDA",
+        "ebitdaratio": "Adjusted EBITDA Margin",
+        "capitalExpenditure": "Capital Expenditures",
+        "freeCashFlow": "Free Cash Flow"
+    }
+
+    # Keep only available columns
+    available_mapping = {k: v for k, v in column_mapping.items() if k in df.columns}
+    summary_df = df[df["symbol"] == ticker][["date"] + list(available_mapping.keys())].copy()
+    summary_df.rename(columns=available_mapping, inplace=True)
+
+    # Sort ascending and take last N quarters
+    summary_lastN = summary_df.sort_values(by="date", ascending=True).tail(num_quarters)
+
+    # Pivot to Tesla-style layout
+    summary_pivot = summary_lastN.set_index("date").T
+
+    # ---- Format numbers ----
+    def format_value(val, metric):
+        if pd.isna(val):
+            return "-"
+        if "Margin" in metric:  # percentage
+            return f"{val * 100:.1f}%"
+        elif metric == "EPS Diluted (GAAP)":
+            return f"{val:.2f}"
+        else:  # billions
+            return f"{val/1e9:.2f}B"
+
+    summary_pivot = summary_pivot.apply(
+        lambda col: [format_value(val, metric) for metric, val in zip(summary_pivot.index, col)],
+        axis=0, result_type="broadcast"
+    )
+
+    # ---- Add YoY % for the latest quarter only ----
+    latest_quarter = summary_lastN["date"].max()
+    prev_year_quarter = (pd.to_datetime(latest_quarter) - pd.DateOffset(years=1)).strftime("%Y-%m-%d")
+
+    yoy_vals = []
+    if prev_year_quarter in summary_df["date"].values:
+        for metric in summary_pivot.index:
+            try:
+                current_raw = summary_df.loc[summary_df["date"] == latest_quarter, metric].values[0]
+                prev_raw = summary_df.loc[summary_df["date"] == prev_year_quarter, metric].values[0]
+                if pd.notna(current_raw) and pd.notna(prev_raw) and prev_raw != 0:
+                    yoy_vals.append(f"{(current_raw - prev_raw) / prev_raw * 100:.1f}%")
+                else:
+                    yoy_vals.append("-")
+            except:
+                yoy_vals.append("-")
+        summary_pivot["YoY %"] = yoy_vals
+
+    # ---- Apply background shading for YoY % ----
+    def shade_yoy(val):
+        if isinstance(val, str) and val.endswith("%"):
+            try:
+                num = float(val.replace("%", ""))
+                if num > 0:
+                    return "background-color: #c6efce; color: #006100;"  # light green bg, dark green text
+                elif num < 0:
+                    return "background-color: #ffc7ce; color: #9c0006;"  # light red bg, dark red text
+            except:
+                return "background-color: #f0f0f0; color: #666;"
+        return "background-color: #f0f0f0; color: #666;"  # gray fallback
+
+    styled = summary_pivot.style.applymap(shade_yoy, subset=["YoY %"]) if "YoY %" in summary_pivot.columns else summary_pivot
+
+    return styled
 
 
 def _make_session() -> requests.Session:

@@ -3,7 +3,7 @@ import streamlit as st
 import os
 import json
 from openai import OpenAI
-from tools import moving_average_tool, past_history_tool #,finance_news_digest_tool
+from tools import moving_average_tool, past_history_tool, generate_financial_summary_tool
 
 st.set_page_config(page_title="Finance AI Assistant", page_icon="💹")
 
@@ -16,6 +16,18 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 
 # Define the one tool for the LLM
 FUNCTIONS = [
+    {
+        "name": "generate_financial_summary_tool",
+        "description": "For a given ticker / stock, generate a table to display its quarterly key metrics.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "ticker": {"type": "string", "description": "Stock ticker, e.g., AAPL"},
+                "num_quarters": {"type": "int", "description": "e.g., 5, 10"},
+            },
+            "required": ["ticker"]
+        }
+    },
     {
         "name": "past_history_tool",
         "description": "Fetch financial data and plot closing prices.",
@@ -79,6 +91,7 @@ def run_agent(user_input):
         "past_history_tool": past_history_tool,
         "moving_average_tool": moving_average_tool,
         # "finance_news_digest_tool": finance_news_digest_tool,
+        "generate_financial_summary_tool": generate_financial_summary_tool
 
         # add more tools here later...
     }

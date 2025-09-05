@@ -91,7 +91,7 @@ def run_agent(user_input):
         "past_history_tool": past_history_tool,
         "moving_average_tool": moving_average_tool,
         # "finance_news_digest_tool": finance_news_digest_tool,
-        "generate_financial_summary_tool": generate_financial_summary_tool
+        "generate_financial_summary_tool": generate_financial_summary_tool,
 
         # add more tools here later...
     }

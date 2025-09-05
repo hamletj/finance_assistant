@@ -3,7 +3,7 @@ import streamlit as st
 import os
 import json
 from openai import OpenAI
-from tools import moving_average_tool, past_history_tool, finance_news_digest_tool
+from tools import moving_average_tool, past_history_tool, #finance_news_digest_tool
 
 st.set_page_config(page_title="Finance AI Assistant", page_icon="💹")
 
@@ -49,19 +49,19 @@ FUNCTIONS = [
             "required": ["ticker"]
         }
     },
-    {
-        "name": "finance_news_digest_tool",
-        "description": "Search Yahoo Finance news for a topic, fetch top articles, and summarize with GPT.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "query": {"type":"string","description":"Finance topic/company, e.g., 'Nvidia earnings', 'latest news about tesla'"},
-                "top_n": {"type":"integer","default":5,"minimum":1},
-                "max_articles_chars": {"type":"integer","default":18000,"minimum":2000}
-            },
-            "required": ["query"]
-        }
-    }
+    # {
+    #     "name": "finance_news_digest_tool",
+    #     "description": "Search Yahoo Finance news for a topic, fetch top articles, and summarize with GPT.",
+    #     "parameters": {
+    #         "type": "object",
+    #         "properties": {
+    #             "query": {"type":"string","description":"Finance topic/company, e.g., 'Nvidia earnings', 'latest news about tesla'"},
+    #             "top_n": {"type":"integer","default":5,"minimum":1},
+    #             "max_articles_chars": {"type":"integer","default":18000,"minimum":2000}
+    #         },
+    #         "required": ["query"]
+    #     }
+    # }
 ]
 
 SYSTEM_PROMPT = (
@@ -78,7 +78,7 @@ def run_agent(user_input):
     tool_registry = {
         "past_history_tool": past_history_tool,
         "moving_average_tool": moving_average_tool,
-        "finance_news_digest_tool": finance_news_digest_tool,
+        # "finance_news_digest_tool": finance_news_digest_tool,
 
         # add more tools here later...
     }

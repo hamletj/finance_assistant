@@ -33,7 +33,7 @@ def generate_financial_summary_tool(ticker: str, num_quarters: int = 5):
     """
 
     # Load dataset
-    df = pd.read_csv(f"data/{ticker}.upper().csv")
+    df = pd.read_csv(f"data/{ticker.upper()}.csv")
 
     # Map dataset columns to financial summary column names
     column_mapping = {

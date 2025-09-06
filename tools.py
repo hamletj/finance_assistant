@@ -22,39 +22,78 @@ try:
 except ImportError:
     OpenAI = None
 
+import os
+import re
+import pandas as pd
+import numpy as np
+
 def generate_financial_summary_tool(ticker: str, num_quarters: int = 5):
     """
-    Generate a Tesla-style financial summary:
-      - Metrics as rows, quarters as columns
-      - Columns ordered ascending by date
-      - Only YoY % for the latest quarter
-      - Numbers formatted like Tesla (billions, %, EPS with 2 decimals)
-      - YoY % highlighted with green/red shading
+    Tesla-style financial summary:
+      - Reads data/{TICKER}.csv
+      - Metrics as rows, quarters (ascending) as columns
+      - Only YoY % for latest quarter
+      - Robust parsing of '1.66B', '532M', '45%', currency symbols, parentheses, dashes, etc.
+      - Values formatted (billions, %, EPS 2dp)
+      - YoY % shaded (green/red)
     """
 
-    def parse_number(val):
+    # ---------- helpers ----------
+    def to_float(x):
+        """Parse strings like '1.66B', '532M', '45%', '$1,234', '(123)', '—' -> float or NaN."""
+        if x is None or (isinstance(x, float) and np.isnan(x)):
+            return np.nan
+        if isinstance(x, (int, float, np.number)):
+            return float(x)
+        s = str(x).strip()
+        if s == "" or s in {"-", "–", "—", "N/A", "NA", "null", "None"}:
+            return np.nan
+        # parentheses for negatives
+        neg = s.startswith("(") and s.endswith(")")
+        if neg:
+            s = s[1:-1]
+        # remove currency and spaces/commas
+        s = s.replace(",", "").replace(" ", "")
+        s = re.sub(r"^[^\d\.\-\+]+", "", s)  # strip leading non-numeric (e.g., $ € ¥)
+        # split number and unit
+        m = re.match(r"^([\-+]?\d*\.?\d+)([a-zA-Z%]*)$", s)
+        if not m:
+            return np.nan
+        num = float(m.group(1))
+        unit = m.group(2).lower()
+        if unit in {"b", "bn", "bill", "billion"}:
+            num *= 1e9
+        elif unit in {"t", "tn", "trn", "trillion"}:
+            num *= 1e12
+        elif unit in {"m", "mm", "million"}:
+            num *= 1e6
+        elif unit in {"k", "thousand"}:
+            num *= 1e3
+        elif unit == "%":
+            num /= 100.0
+        return -num if neg else num
+
+    def fmt_value(val, metric_name):
         if pd.isna(val):
-            return None
-        if isinstance(val, (int, float)):
-            return val
-        s = str(val).replace(",", "").strip()
-        try:
-            if s.endswith("B"):
-                return float(s[:-1]) * 1e9
-            elif s.endswith("M"):
-                return float(s[:-1]) * 1e6
-            elif s.endswith("%"):
-                return float(s[:-1]) / 100.0
-            else:
-                return float(s)
-        except ValueError:
-            return None
+            return "-"
+        if "Margin" in metric_name:     # ratio -> %
+            return f"{val * 100:.1f}%"
+        if metric_name == "EPS Diluted (GAAP)":
+            return f"{val:.2f}"
+        # financial amounts -> billions
+        return f"{val / 1e9:.2f}B"
 
-    # ---- Load dataset ----
-    file_path = f"data/{ticker.upper()}.csv"
-    df = pd.read_csv(file_path)
+    # ---------- load ----------
+    path = f"data/{ticker.upper()}.csv"
+    if not os.path.exists(path):
+        return pd.DataFrame([{"Error": f"File not found: {path}"}])
 
-    column_mapping = {
+    # read as strings to avoid pandas partial casting issues
+    df = pd.read_csv(path, dtype=str)
+
+    # ---------- column normalization ----------
+    # Accept both raw API column names and "pretty" names
+    raw_to_pretty = {
         "revenue": "Total Revenues",
         "grossProfit": "Gross Profit",
         "grossProfitRatio": "Gross Margin",
@@ -65,70 +104,113 @@ def generate_financial_summary_tool(ticker: str, num_quarters: int = 5):
         "ebitda": "Adjusted EBITDA",
         "ebitdaratio": "Adjusted EBITDA Margin",
         "capitalExpenditure": "Capital Expenditures",
-        "freeCashFlow": "Free Cash Flow"
+        "freeCashFlow": "Free Cash Flow",
     }
+    pretty_set = set(raw_to_pretty.values())
 
-    available_mapping = {k: v for k, v in column_mapping.items() if k in df.columns}
-    summary_df = df[df["symbol"] == ticker][["date"] + list(available_mapping.keys())].copy()
+    # Ensure mandatory columns exist
+    if "date" not in df.columns:
+        return pd.DataFrame([{"Error": "CSV missing required 'date' column."}])
+    if "symbol" in df.columns:
+        df["symbol"] = df["symbol"].astype(str).str.upper()
+        df = df[df["symbol"] == ticker.upper()]
 
-    # ✅ Parse *before* renaming
-    for col in available_mapping.keys():
-        summary_df[col] = summary_df[col].apply(parse_number)
+    # Build a working frame with either raw or pretty columns
+    keep_cols = ["date"]
+    # include raw columns that exist
+    keep_cols += [c for c in raw_to_pretty.keys() if c in df.columns]
+    # include pretty columns that exist
+    keep_cols += [c for c in pretty_set if c in df.columns]
+    keep_cols = list(dict.fromkeys(keep_cols))  # dedupe, keep order
 
-    summary_df.rename(columns=available_mapping, inplace=True)
+    work = df[keep_cols].copy()
 
-    # ---- Sort ascending and take last N quarters ----
-    summary_lastN = summary_df.sort_values(by="date", ascending=True).tail(num_quarters)
-    summary_pivot = summary_lastN.set_index("date").T
+    # Parse all non-date columns
+    for c in work.columns:
+        if c != "date":
+            work[c] = work[c].apply(to_float)
 
-    # ---- Format numbers ----
-    def format_value(val, metric):
-        if pd.isna(val):
-            return "-"
-        if "Margin" in metric:  # percentage
-            return f"{val * 100:.1f}%"
-        elif metric == "EPS Diluted (GAAP)":
-            return f"{val:.2f}"
-        else:  # billions
-            return f"{val/1e9:.2f}B"
+    # Rename raw->pretty
+    rename_map = {raw: pretty for raw, pretty in raw_to_pretty.items() if raw in work.columns}
+    work.rename(columns=rename_map, inplace=True)
 
-    summary_pivot = summary_pivot.apply(
-        lambda col: [format_value(val, metric) for metric, val in zip(summary_pivot.index, col)],
-        axis=0, result_type="broadcast"
-    )
+    # Keep only the pretty metric columns we know (and that exist)
+    metrics_order = [
+        "Total Revenues",
+        "Gross Profit",
+        "Gross Margin",
+        "Income from Operations",
+        "Operating Margin",
+        "GAAP Net Income",
+        "EPS Diluted (GAAP)",
+        "Adjusted EBITDA",
+        "Adjusted EBITDA Margin",
+        "Capital Expenditures",
+        "Free Cash Flow",
+    ]
+    existing_metrics = [m for m in metrics_order if m in work.columns]
 
-    # ---- Add YoY % for the latest quarter ----
-    latest_quarter = summary_lastN["date"].max()
-    prev_year_quarter = (pd.to_datetime(latest_quarter) - pd.DateOffset(years=1)).strftime("%Y-%m-%d")
+    # ---------- prepare quarters ----------
+    work["date"] = pd.to_datetime(work["date"], errors="coerce")
+    work = work.dropna(subset=["date"]).sort_values("date")
+    lastN = work.tail(num_quarters).copy()
+    if lastN.empty:
+        return pd.DataFrame([{"Error": "No rows for selected ticker/quarters."}])
 
-    yoy_vals = []
-    if prev_year_quarter in summary_df["date"].values:
-        for metric in summary_pivot.index:
-            try:
-                current_raw = summary_df.loc[summary_df["date"] == latest_quarter, metric].values[0]
-                prev_raw = summary_df.loc[summary_df["date"] == prev_year_quarter, metric].values[0]
-                if pd.notna(current_raw) and pd.notna(prev_raw) and prev_raw != 0:
-                    yoy_vals.append(f"{(current_raw - prev_raw) / prev_raw * 100:.1f}%")
-                else:
-                    yoy_vals.append("-")
-            except:
-                yoy_vals.append("-")
-        summary_pivot["YoY %"] = yoy_vals
+    # ---------- pivot (metrics rows x quarter columns) ----------
+    pivot = lastN.set_index("date")[existing_metrics].T
+    # compute YoY for latest quarter using the cleaned numeric data
+    latest_dt = lastN["date"].max()
+    prev_year_dt = latest_dt - pd.DateOffset(years=1)
 
-    # ---- Apply shading ----
-    def shade_yoy(val):
+    # find the exact previous-year date present in data (match by YYYY-MM-DD)
+    prev_key = work[work["date"] == prev_year_dt]
+    # If exact match missing, try closest same-quarter within +/- 10 days (optional)
+    if prev_key.empty:
+        prev_key = work[(work["date"] >= prev_year_dt - pd.Timedelta(days=10)) &
+                        (work["date"] <= prev_year_dt + pd.Timedelta(days=10))]
+
+    if not prev_key.empty:
+        yoy_vals = []
+        for m in pivot.index:
+            cur = work.loc[work["date"] == latest_dt, m]
+            prv = work.loc[work["date"].isin(prev_key["date"]), m]
+            cur_val = cur.iloc[0] if not cur.empty else np.nan
+            prv_val = prv.iloc[0] if not prv.empty else np.nan
+            if pd.notna(cur_val) and pd.notna(prv_val) and prv_val != 0:
+                yoy = (cur_val - prv_val) / prv_val * 100.0
+                yoy_vals.append(yoy)
+            else:
+                yoy_vals.append(np.nan)
+        pivot["YoY %"] = yoy_vals
+
+    # ---------- format for display ----------
+    # format quarter headers as YYYY-MM-DD strings in ascending order
+    pivot.columns = [c.strftime("%Y-%m-%d") if isinstance(c, pd.Timestamp) else c for c in pivot.columns]
+    # apply human-readable formatting
+    for col in pivot.columns:
+        if col == "YoY %":
+            continue
+        pivot[col] = [fmt_value(v, m) for m, v in zip(pivot.index, lastN.set_index("date")[existing_metrics][pd.to_datetime(col)].reindex(pivot.index).values)]
+
+    # format YoY as percent string
+    if "YoY %" in pivot.columns:
+        pivot["YoY %"] = pivot["YoY %"].apply(lambda x: "-" if pd.isna(x) else f"{x:.1f}%")
+
+    # ---------- style shading for YoY ----------
+    def shade(val):
         if isinstance(val, str) and val.endswith("%"):
             try:
-                num = float(val.replace("%", ""))
+                num = float(val[:-1])
                 if num > 0:
-                    return "background-color: #c6efce; color: #006100;"
-                elif num < 0:
-                    return "background-color: #ffc7ce; color: #9c0006;"
-            except:
-                return "background-color: #f0f0f0; color: #666;"
-        return "background-color: #f0f0f0; color: #666;"
+                    return "background-color:#c6efce;color:#006100;"
+                if num < 0:
+                    return "background-color:#ffc7ce;color:#9c0006;"
+            except Exception:
+                pass
+        return "background-color:#f0f0f0;color:#666;"
 
-    styled = summary_pivot.style.applymap(shade_yoy, subset=["YoY %"]) if "YoY %" in summary_pivot.columns else summary_pivot
+    styled = pivot.style.applymap(shade, subset=["YoY %"]) if "YoY %" in pivot.columns else pivot
     return styled
 
 

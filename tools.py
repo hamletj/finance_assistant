@@ -94,6 +94,7 @@ def generate_financial_summary_tool(ticker: str, num_quarters: int = 5):
         raise FileNotFoundError(path)
 
     df = pd.read_csv(path)
+    print('Data loaded')
 
     # --- Filter by ticker if column exists ---
     if "symbol" in df.columns:
@@ -241,6 +242,8 @@ def generate_financial_summary_tool(ticker: str, num_quarters: int = 5):
         pivot_display["YoY %"] = pivot["YoY %"].apply(
             lambda x: "-" if pd.isna(x) else f"{x:.1f}%"
         )
+
+    print('Ending generate_financial_summary_tool')
 
     return {
         "pivot_numeric": pivot,

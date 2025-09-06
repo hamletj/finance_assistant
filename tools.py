@@ -88,7 +88,8 @@ def generate_financial_summary_tool(ticker: str, num_quarters: int = 5):
         return f"{val / 1e9:.2f}B"
 
     # --- Load CSV ---
-    path = f"/mnt/data/{ticker.upper()}.csv"
+    path = os.path.join("data", f"{ticker.upper()}.csv")
+
     if not os.path.exists(path):
         raise FileNotFoundError(path)
 

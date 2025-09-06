@@ -22,10 +22,6 @@ try:
 except ImportError:
     OpenAI = None
 
-import pandas as pd
-
-import pandas as pd
-
 def generate_financial_summary_tool(ticker: str, num_quarters: int = 5):
     """
     Generate a Tesla-style financial summary:
@@ -36,15 +32,12 @@ def generate_financial_summary_tool(ticker: str, num_quarters: int = 5):
       - YoY % highlighted with green/red shading
     """
 
-    # ---- Helper: parse values like '1.66B', '532M', '45%' into floats ----
     def parse_number(val):
         if pd.isna(val):
             return None
         if isinstance(val, (int, float)):
             return val
-
         s = str(val).replace(",", "").strip()
-
         try:
             if s.endswith("B"):
                 return float(s[:-1]) * 1e9
@@ -61,7 +54,6 @@ def generate_financial_summary_tool(ticker: str, num_quarters: int = 5):
     file_path = f"data/{ticker.upper()}.csv"
     df = pd.read_csv(file_path)
 
-    # Map dataset columns to financial summary column names
     column_mapping = {
         "revenue": "Total Revenues",
         "grossProfit": "Gross Profit",
@@ -78,12 +70,12 @@ def generate_financial_summary_tool(ticker: str, num_quarters: int = 5):
 
     available_mapping = {k: v for k, v in column_mapping.items() if k in df.columns}
     summary_df = df[df["symbol"] == ticker][["date"] + list(available_mapping.keys())].copy()
-    summary_df.rename(columns=available_mapping, inplace=True)
 
-    # ---- Clean numbers ----
-    for col in summary_df.columns:
-        if col not in ["date", "symbol"]:
-            summary_df[col] = summary_df[col].apply(parse_number)
+    # ✅ Parse *before* renaming
+    for col in available_mapping.keys():
+        summary_df[col] = summary_df[col].apply(parse_number)
+
+    summary_df.rename(columns=available_mapping, inplace=True)
 
     # ---- Sort ascending and take last N quarters ----
     summary_lastN = summary_df.sort_values(by="date", ascending=True).tail(num_quarters)
@@ -105,7 +97,7 @@ def generate_financial_summary_tool(ticker: str, num_quarters: int = 5):
         axis=0, result_type="broadcast"
     )
 
-    # ---- Add YoY % for the latest quarter only ----
+    # ---- Add YoY % for the latest quarter ----
     latest_quarter = summary_lastN["date"].max()
     prev_year_quarter = (pd.to_datetime(latest_quarter) - pd.DateOffset(years=1)).strftime("%Y-%m-%d")
 
@@ -123,22 +115,22 @@ def generate_financial_summary_tool(ticker: str, num_quarters: int = 5):
                 yoy_vals.append("-")
         summary_pivot["YoY %"] = yoy_vals
 
-    # ---- Apply background shading for YoY % ----
+    # ---- Apply shading ----
     def shade_yoy(val):
         if isinstance(val, str) and val.endswith("%"):
             try:
                 num = float(val.replace("%", ""))
                 if num > 0:
-                    return "background-color: #c6efce; color: #006100;"  # green
+                    return "background-color: #c6efce; color: #006100;"
                 elif num < 0:
-                    return "background-color: #ffc7ce; color: #9c0006;"  # red
+                    return "background-color: #ffc7ce; color: #9c0006;"
             except:
                 return "background-color: #f0f0f0; color: #666;"
         return "background-color: #f0f0f0; color: #666;"
 
     styled = summary_pivot.style.applymap(shade_yoy, subset=["YoY %"]) if "YoY %" in summary_pivot.columns else summary_pivot
-
     return styled
+
 
 def _make_session() -> requests.Session:
     s = requests.Session()

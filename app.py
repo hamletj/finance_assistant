@@ -66,7 +66,7 @@ FUNCTIONS = [
     }
 ]
 
-SYSTEM_PROMPT = "You are a finance assistant. Select tools to fulfill requests."
+SYSTEM_PROMPT = "You are a finance assistant. If it's a general question, you don't need to select a tool. Just answer. If it's a question highly releted to the tools, select tools to fulfill requests."
 
 def run_agent(user_input: str):
     messages = [

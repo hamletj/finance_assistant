@@ -24,7 +24,9 @@ except ImportError:
 
 import pandas as pd
 
-def generate_financial_summary_tool(file_path: str, ticker: str, num_quarters: int = 5):
+import pandas as pd
+
+def generate_financial_summary_tool(ticker: str, num_quarters: int = 5):
     """
     Generate a Tesla-style financial summary:
       - Metrics as rows, quarters as columns
@@ -56,6 +58,7 @@ def generate_financial_summary_tool(file_path: str, ticker: str, num_quarters: i
             return None
 
     # ---- Load dataset ----
+    file_path = f"data/{ticker.upper()}.csv"
     df = pd.read_csv(file_path)
 
     # Map dataset columns to financial summary column names

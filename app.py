@@ -23,7 +23,7 @@ FUNCTIONS = [
             "type": "object",
             "properties": {
                 "ticker": {"type": "string", "description": "Stock ticker, e.g., AAPL"},
-                "num_quarters": {"type": "int", "description": "e.g., 5, 10"},
+                "num_quarters": {"type": "integer", "description": "e.g., 5, 10"},
             },
             "required": ["ticker"]
         }

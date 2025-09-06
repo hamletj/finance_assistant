@@ -81,7 +81,7 @@ def run_agent(user_input: str):
     }
 
     resp = client.chat.completions.create(
-        model="gpt-4o-mini",
+        model="gpt-5-mini", #"gpt-4o-mini",
         messages=messages,
         functions=FUNCTIONS,
         function_call="auto"

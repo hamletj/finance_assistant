@@ -1,83 +1,287 @@
 # tools.py
-import yfinance as yf
-import pandas as pd
-import matplotlib.pyplot as plt
-import tempfile
 import os
 import re
+import time
+import random
+import tempfile
+import math
+import requests
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
 from datetime import datetime, timezone, timedelta
 from pandas.tseries.offsets import DateOffset
-import requests
 from typing import List, Dict, Optional
-import time, html
-from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
-from bs4 import BeautifulSoup
-import random
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
+from bs4 import BeautifulSoup
 
 try:
-    # OpenAI Python SDK v1 style
+    # OpenAI Python SDK v1 style optional import (used by commented news tool)
     from openai import OpenAI
-except ImportError:
+except Exception:
     OpenAI = None
 
-import os
-import re
-import pandas as pd
-import numpy as np
 
-import os, re
-import pandas as pd
-import numpy as np
+# ----------------------
+# Shared parsing & formatting helpers
+# ----------------------
+def _parse_number_str(x):
+    """Robust parse helper: '1.66B','532M','45%','$1,234','(123)' -> float or NaN"""
+    if x is None:
+        return np.nan
+    if isinstance(x, (int, float, np.number)):
+        try:
+            return float(x)
+        except Exception:
+            return np.nan
+    s = str(x).strip()
+    if s == "" or s in {"-", "–", "—", "N/A", "NA", "null", "None"}:
+        return np.nan
 
+    neg = False
+    if s.startswith("(") and s.endswith(")"):
+        neg = True
+        s = s[1:-1].strip()
+
+    # remove thousands separators and spaces
+    s = s.replace(",", "").replace(" ", "")
+    # remove leading currency or stray characters
+    s = re.sub(r"^[^\d\.\-\+]+", "", s)
+    # strip trailing stray chars except letters and %
+    s = re.sub(r"[^\d\.\-\+a-zA-Z%]+$", "", s)
+
+    m = re.match(r"^([\-+]?\d*\.?\d+)([a-zA-Z%]*)$", s)
+    if not m:
+        return np.nan
+    num = float(m.group(1))
+    unit = m.group(2).lower()
+
+    if unit in {"b", "bn", "bill", "billion"}:
+        num *= 1e9
+    elif unit in {"t", "tn", "trn", "trillion"}:
+        num *= 1e12
+    elif unit in {"m", "mm", "million"}:
+        num *= 1e6
+    elif unit in {"k", "thousand"}:
+        num *= 1e3
+    elif unit == "%":
+        num /= 100.0
+
+    return -num if neg else num
+
+
+def _human_money(x):
+    """Format numbers with T/B/M/K; keep NaN as '-'"""
+    if x is None or (isinstance(x, float) and np.isnan(x)):
+        return "-"
+    try:
+        x = float(x)
+    except Exception:
+        return "-"
+    sign = "-" if x < 0 else ""
+    a = abs(x)
+    if a >= 1e12:
+        return f"{sign}{a/1e12:.2f}T"
+    if a >= 1e9:
+        return f"{sign}{a/1e9:.2f}B"
+    if a >= 1e6:
+        return f"{sign}{a/1e6:.2f}M"
+    if a >= 1e3:
+        return f"{sign}{a/1e3:.2f}K"
+    return f"{sign}{a:.2f}"
+
+
+def _human_pct(x, decimals=1):
+    if x is None or (isinstance(x, float) and np.isnan(x)):
+        return "-"
+    try:
+        return f"{x*100:.{decimals}f}%"
+    except Exception:
+        return "-"
+
+
+def _human_plain(x, decimals=2):
+    if x is None or (isinstance(x, float) and np.isnan(x)):
+        return "-"
+    try:
+        return f"{x:.{decimals}f}"
+    except Exception:
+        return "-"
+
+
+def _cagr(start, end, years):
+    if start is None or end is None:
+        return np.nan
+    try:
+        start = float(start)
+        end = float(end)
+        if start <= 0 or years <= 0:
+            return np.nan
+        return (end / start) ** (1.0 / years) - 1.0
+    except Exception:
+        return np.nan
+
+
+# ----------------------
+# Existing finance tools (kept largely intact)
+# ----------------------
+def _parse_period_to_offset(period: str) -> DateOffset:
+    if period == "max":
+        return DateOffset(years=30)
+    m = re.fullmatch(r"(\d+)([a-zA-Z]+)", period.strip())
+    if not m:
+        raise ValueError(f"Unsupported period format: {period}")
+    n, unit = int(m.group(1)), m.group(2).lower()
+    if unit in ("d", "day", "days"):
+        return DateOffset(days=n)
+    if unit in ("wk", "w", "week", "weeks"):
+        return DateOffset(weeks=n)
+    if unit in ("mo", "month", "months"):
+        return DateOffset(months=n)
+    if unit in ("y", "yr", "year", "years"):
+        return DateOffset(years=n)
+    raise ValueError(f"Unsupported period unit: {unit}")
+
+
+def _interval_to_timedelta(interval: str) -> timedelta:
+    interval = interval.lower().strip()
+    if interval.endswith("m"):  # minutes
+        return timedelta(minutes=int(interval[:-1]))
+    if interval.endswith("h"):  # hours
+        return timedelta(hours=int(interval[:-1]))
+    if interval == "1d":
+        return timedelta(days=1)
+    if interval == "5d":
+        return timedelta(days=5)
+    if interval == "1wk":
+        return timedelta(weeks=1)
+    if interval == "1mo":
+        return timedelta(days=30)
+    if interval == "3mo":
+        return timedelta(days=90)
+    return timedelta(days=1)
+
+
+def moving_average_tool(ticker: str, period: str = "1y", interval: str = "1d", windows=(20,)):
+    ticker = ticker.strip().upper()
+    result = {"text": "", "image_path": None}
+
+    try:
+        windows = [int(w) for w in windows if int(w) > 1]
+        if not windows:
+            result["text"] = "No valid moving-average windows provided (need integers > 1)."
+            return result
+    except Exception:
+        result["text"] = "Invalid `windows` argument; provide integers > 1."
+        return result
+
+    max_win = max(windows)
+    now = datetime.now(timezone.utc)
+    try:
+        period_offset = _parse_period_to_offset(period)
+    except Exception as e:
+        result["text"] = f"Invalid period '{period}': {e}"
+        return result
+
+    visible_end = now
+    visible_start = (now - period_offset)
+    bar_delta = _interval_to_timedelta(interval)
+    extra_seconds = int((max_win - 1) * bar_delta.total_seconds() * 1.2)
+    lookback_start = visible_start - timedelta(seconds=extra_seconds)
+
+    try:
+        import yfinance as yf
+        t = yf.Ticker(ticker)
+        hist = t.history(start=lookback_start, end=visible_end, interval=interval, auto_adjust=False)
+        if hist.empty:
+            result["text"] = f"No data found for {ticker}."
+            return result
+        hist = hist.reset_index()
+    except Exception as e:
+        result["text"] = f"Error fetching data for {ticker}: {e}"
+        return result
+
+    for w in windows:
+        if len(hist) >= w:
+            hist[f"SMA_{w}"] = hist["Close"].rolling(window=w).mean()
+
+    mask_visible = hist["Date"] >= pd.Timestamp(visible_start)
+
+    fig, ax = plt.subplots()
+    vis = hist.loc[mask_visible]
+    ax.plot(vis["Date"], vis["Close"], marker="o", label="Close")
+    for w in windows:
+        col = f"SMA_{w}"
+        if col in hist.columns:
+            sma_vis = hist.loc[mask_visible, ["Date", col]].dropna()
+            if not sma_vis.empty:
+                ax.plot(sma_vis["Date"], sma_vis[col], linewidth=2, label=f"SMA {w}")
+
+    ax.set_title(f"{ticker} Close with Moving Averages")
+    ax.set_xlabel("Date")
+    ax.set_ylabel("Price (USD)")
+    ax.legend(loc="best")
+    fig.autofmt_xdate()
+
+    tmpdir = tempfile.gettempdir()
+    fname = f"{ticker}_ma_{int(datetime.now(timezone.utc).timestamp())}.png"
+    path = os.path.join(tmpdir, fname)
+    plt.savefig(path, bbox_inches="tight")
+    plt.close(fig)
+
+    result["image_path"] = path
+    result["text"] = (
+        f"Plotted {ticker} Close ({period}, {interval}) with SMAs: " + ", ".join(str(w) for w in windows)
+    )
+    return result
+
+
+def past_history_tool(ticker: str, period: str = "1mo", interval: str = "1d"):
+    ticker = ticker.strip().upper()
+    result = {"text": "", "image_path": None}
+    try:
+        import yfinance as yf
+        t = yf.Ticker(ticker)
+        hist = t.history(period=period, interval=interval)
+        if hist.empty:
+            result["text"] = f"No data found for {ticker}."
+            return result
+        hist = hist.reset_index()
+    except Exception as e:
+        result["text"] = f"Error fetching data for {ticker}: {e}"
+        return result
+
+    fig, ax = plt.subplots()
+    ax.plot(hist["Date"], hist["Close"], marker="o")
+    ax.set_title(f"{ticker} Closing Prices")
+    ax.set_xlabel("Date")
+    ax.set_ylabel("Price (USD)")
+    fig.autofmt_xdate()
+
+    tmpdir = tempfile.gettempdir()
+    fname = f"{ticker}_plot_{int(datetime.utcnow().timestamp())}.png"
+    path = os.path.join(tmpdir, fname)
+    plt.savefig(path, bbox_inches='tight')
+    plt.close(fig)
+
+    result["image_path"] = path
+    return result
+
+
+# ----------------------
+# Original generate_financial_summary_tool (kept)
+# ----------------------
 def generate_financial_summary_tool(ticker: str, num_quarters: int = 5):
     """
     Generate a Tesla-style financial summary for a given ticker.
-    Reads /mnt/data/{TICKER}.csv, parses numbers, builds pivot, and formats output.
+    Reads data/{TICKER}.csv, parses numbers, builds pivot, and formats output.
     """
-
-    # --- Helper: parse string with units like "1.66B", "532M", "45%", "(123M)" ---
     def parse_number(x):
-        if x is None:
-            return np.nan
-        if isinstance(x, (int, float, np.number)):
-            return float(x)
+        return _parse_number_str(x)
 
-        s = str(x).strip()
-        if s == "" or s in {"-", "–", "—", "N/A", "NA", "null", "None"}:
-            return np.nan
-
-        neg = False
-        if s.startswith("(") and s.endswith(")"):
-            neg = True
-            s = s[1:-1].strip()
-
-        s = s.replace(",", "").replace(" ", "")
-        s = re.sub(r"^[^\d\.\-\+]+", "", s)
-        s = re.sub(r"[^\d\.\-\+a-zA-Z%]+$", "", s)
-
-        m = re.match(r"^([\-+]?\d*\.?\d+)([a-zA-Z%]*)$", s)
-        if not m:
-            return np.nan
-
-        num = float(m.group(1))
-        unit = m.group(2).lower()
-
-        if unit in {"b", "bn", "bill", "billion"}:
-            num *= 1e9
-        elif unit in {"t", "tn", "trn", "trillion"}:
-            num *= 1e12
-        elif unit in {"m", "mm", "million"}:
-            num *= 1e6
-        elif unit in {"k", "thousand"}:
-            num *= 1e3
-        elif unit == "%":
-            num /= 100.0
-
-        return -num if neg else num
-
-    # --- Helper: pretty formatting for display table ---
     def fmt_value(val, metric_name):
         if pd.isna(val):
             return "-"
@@ -87,16 +291,12 @@ def generate_financial_summary_tool(ticker: str, num_quarters: int = 5):
             return f"{val:.2f}"
         return f"{val / 1e9:.2f}B"
 
-    # --- Load CSV ---
     path = os.path.join("data", f"{ticker.upper()}.csv")
-
     if not os.path.exists(path):
         raise FileNotFoundError(path)
 
     df = pd.read_csv(path)
-    print('Data loaded')
-
-    # --- Filter by ticker if column exists ---
+    # Filter by symbol column if present
     if "symbol" in df.columns:
         df["symbol"] = df["symbol"].astype(str).str.upper()
         df = df[df["symbol"] == ticker.upper()]
@@ -108,7 +308,7 @@ def generate_financial_summary_tool(ticker: str, num_quarters: int = 5):
     cols_to_parse = []
     coerced_to_numeric = []
 
-    # --- Decide which columns to parse ---
+    # Decide which columns to parse
     for c in df.columns:
         if c in protected:
             continue
@@ -119,7 +319,6 @@ def generate_financial_summary_tool(ticker: str, num_quarters: int = 5):
         sample = col.dropna().astype(str).head(200).tolist()
         if not sample:
             continue
-
         needs_parse = False
         for s in sample:
             s_strip = s.strip()
@@ -137,7 +336,6 @@ def generate_financial_summary_tool(ticker: str, num_quarters: int = 5):
                 if re.search(r"\d", s_strip):
                     needs_parse = True
                     break
-
         if needs_parse:
             cols_to_parse.append(c)
         else:
@@ -147,11 +345,9 @@ def generate_financial_summary_tool(ticker: str, num_quarters: int = 5):
                 df[c] = coerced
                 coerced_to_numeric.append(c)
 
-    # --- Apply parsing ---
     for c in cols_to_parse:
         df[c] = df[c].apply(parse_number)
 
-    # --- Mapping raw → pretty metric names ---
     raw_to_pretty = {
         "revenue": "Total Revenues",
         "grossProfit": "Gross Profit",
@@ -197,7 +393,6 @@ def generate_financial_summary_tool(ticker: str, num_quarters: int = 5):
     if lastN.empty:
         raise ValueError("No valid date rows for selected ticker/quarters.")
 
-    # --- Build pivot ---
     pivot = lastN.set_index("date")[metrics].T
 
     latest_dt = lastN["date"].max()
@@ -209,7 +404,6 @@ def generate_financial_summary_tool(ticker: str, num_quarters: int = 5):
             & (work["date"] <= prev_year_dt + pd.Timedelta(days=10))
         ]
 
-    # --- Compute YoY ---
     yoy_vals = []
     if not prev_rows.empty:
         for m in pivot.index:
@@ -223,27 +417,18 @@ def generate_financial_summary_tool(ticker: str, num_quarters: int = 5):
                 yoy_vals.append(np.nan)
         pivot["YoY %"] = yoy_vals
 
-    pivot.columns = [
-        c.strftime("%Y-%m-%d") if isinstance(c, (pd.Timestamp, np.datetime64)) else c
-        for c in pivot.columns
-    ]
+    pivot.columns = [c.strftime("%Y-%m-%d") if isinstance(c, (pd.Timestamp, np.datetime64)) else c for c in pivot.columns]
 
-    # --- Pretty display ---
     pivot_display = pivot.copy()
     for col in pivot_display.columns:
         if col == "YoY %":
             continue
         dt = pd.to_datetime(col)
         numeric_series = lastN.set_index("date")[metrics].loc[dt]
-        pivot_display[col] = [
-            fmt_value(v, m) for m, v in zip(pivot_display.index, numeric_series.values)
-        ]
-    if "YoY %" in pivot_display.columns:
-        pivot_display["YoY %"] = pivot["YoY %"].apply(
-            lambda x: "-" if pd.isna(x) else f"{x:.1f}%"
-        )
+        pivot_display[col] = [fmt_value(v, m) for m, v in zip(pivot_display.index, numeric_series.values)]
 
-    print('Ending generate_financial_summary_tool')
+    if "YoY %" in pivot_display.columns:
+        pivot_display["YoY %"] = pivot["YoY %"].apply(lambda x: "-" if pd.isna(x) else f"{x:.1f}%")
 
     return {
         "pivot_numeric": pivot,
@@ -252,18 +437,334 @@ def generate_financial_summary_tool(ticker: str, num_quarters: int = 5):
         "coerced_numeric_columns": coerced_to_numeric,
     }
 
+
+# ----------------------
+# Comparison tools (Growth & Profitability)
+# ----------------------
+def compare_growth_tool(tickers: List[str]):
+    """
+    Compare growth metrics across multiple tickers.
+    Returns: {"tables": [("Growth", df_display)]}
+    """
+    metrics = [
+        "Revenue Growth (YoY)",
+        "Revenue Growth (FWD TTM YoY)",
+        "Revenue 3 Year (CAGR)",
+        "Revenue 5 Year (CAGR)",
+        "EBITDA Growth (YoY)",
+        "EBITDA Growth (FWD TTM YoY)",
+        "EBITDA 3 Year (CAGR)",
+        "EBIT 3 Year (CAGR)",
+        "Net Income 3 Year (CAGR)",
+        "EPS Growth Diluted (YoY)",
+        "EPS Growth Diluted (FWD TTM YoY)",
+        "EPS Diluted 3 Year (CAGR)",
+        "Tang Book Value 3 Year (CAGR)",
+        "Total Assets 3 Year (CAGR)",
+        "Levered FCF 3 Year (CAGR)"
+    ]
+
+    results = {m: {} for m in metrics}
+    tickers_upper = [t.strip().upper() for t in tickers]
+
+    for ticker in tickers_upper:
+        path = os.path.join("data", f"{ticker}.csv")
+        if not os.path.exists(path):
+            continue
+        df = pd.read_csv(path, dtype=str)
+        if "date" not in df.columns:
+            continue
+        if "symbol" in df.columns:
+            df = df[df["symbol"].astype(str).str.upper() == ticker]
+        if df.empty:
+            continue
+
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+        df = df.dropna(subset=["date"]).sort_values("date").reset_index(drop=True)
+
+        def get_col(name):
+            return df[name].apply(_parse_number_str) if name in df.columns else pd.Series([np.nan] * len(df))
+
+        revenue_s = get_col("revenue")
+        ebitda_s = get_col("ebitda")
+        ebit_s = get_col("operatingIncome")
+        net_s = get_col("netIncome")
+        eps_s = get_col("epsdiluted")
+        fcf_s = get_col("freeCashFlow")
+        opcf_s = get_col("operatingCashFlow")
+        capex_s = get_col("capitalExpenditure")
+        assets_s = get_col("totalAssets") if "totalAssets" in df.columns else get_col("assets")
+        equity_s = get_col("totalStockholdersEquity") if "totalStockholdersEquity" in df.columns else get_col("totalEquity")
+        tang_book_s = get_col("tangibleBookValue") if "tangibleBookValue" in df.columns else (equity_s - get_col("intangibleAssets") if "intangibleAssets" in df.columns else pd.Series([np.nan] * len(df)))
+
+        latest_idx = df["date"].idxmax()
+        latest_dt = df.loc[latest_idx, "date"]
+        prev_year_dt = latest_dt - pd.DateOffset(years=1)
+
+        # TTM sums (last 4 rows assumed quarterly)
+        ttm_n = 4
+        if len(df) >= ttm_n:
+            ttm_revenue = revenue_s.tail(ttm_n).sum()
+            ttm_revenue_prev = revenue_s.head(len(df)-ttm_n).tail(ttm_n).sum() if len(df) >= ttm_n*2 else np.nan
+            ttm_ebitda = ebitda_s.tail(ttm_n).sum()
+            ttm_ebitda_prev = ebitda_s.head(len(df)-ttm_n).tail(ttm_n).sum() if len(df) >= ttm_n*2 else np.nan
+            ttm_eps = eps_s.tail(ttm_n).sum()
+            ttm_eps_prev = eps_s.head(len(df)-ttm_n).tail(ttm_n).sum() if len(df) >= ttm_n*2 else np.nan
+            ttm_fcf = fcf_s.tail(ttm_n).sum()
+            ttm_fcf_prev = fcf_s.head(len(df)-ttm_n).tail(ttm_n).sum() if len(df) >= ttm_n*2 else np.nan
+        else:
+            ttm_revenue = ttm_revenue_prev = ttm_ebitda = ttm_ebitda_prev = ttm_eps = ttm_eps_prev = ttm_fcf = ttm_fcf_prev = np.nan
+
+        # helper to get same quarter prev year value (or ±10 day)
+        same_prev_mask = df["date"] == prev_year_dt
+        if same_prev_mask.any():
+            prev_revenue = revenue_s[same_prev_mask].iloc[0]
+            prev_ebitda = ebitda_s[same_prev_mask].iloc[0] if not ebitda_s.isna().all() else np.nan
+            prev_eps = eps_s[same_prev_mask].iloc[0] if not eps_s.isna().all() else np.nan
+        else:
+            window = df[(df["date"] >= prev_year_dt - pd.Timedelta(days=10)) & (df["date"] <= prev_year_dt + pd.Timedelta(days=10))]
+            prev_revenue = revenue_s.loc[window.index[0]] if not window.empty else np.nan
+            prev_ebitda = ebitda_s.loc[window.index[0]] if not window.empty else np.nan
+            prev_eps = eps_s.loc[window.index[0]] if not window.empty else np.nan
+
+        cur_revenue = revenue_s.iloc[latest_idx] if not revenue_s.isna().all() else np.nan
+        revenue_yoy = (cur_revenue - prev_revenue)/prev_revenue if pd.notna(cur_revenue) and pd.notna(prev_revenue) and prev_revenue != 0 else np.nan
+        revenue_fwd_yoy = (ttm_revenue - ttm_revenue_prev)/ttm_revenue_prev if pd.notna(ttm_revenue) and pd.notna(ttm_revenue_prev) and ttm_revenue_prev != 0 else np.nan
+
+        # CAGR calculations
+        def value_at_years_ago(series, dates, years):
+            target = dates.max() - pd.DateOffset(years=years)
+            match = series[dates == target]
+            if not match.empty:
+                return match.iloc[0]
+            window = series[(dates >= target - pd.Timedelta(days=30)) & (dates <= target + pd.Timedelta(days=30))]
+            if not window.empty:
+                return window.iloc[0]
+            return np.nan
+
+        rev_3_start = value_at_years_ago(revenue_s, df["date"], 3)
+        rev_3_cagr = _cagr(rev_3_start, cur_revenue, 3)
+        rev_5_start = value_at_years_ago(revenue_s, df["date"], 5)
+        rev_5_cagr = _cagr(rev_5_start, cur_revenue, 5)
+
+        # EBITDA YoY & CAGR
+        cur_ebitda = ebitda_s.iloc[latest_idx] if not ebitda_s.isna().all() else np.nan
+        ebitda_yoy = (cur_ebitda - prev_ebitda)/prev_ebitda if pd.notna(cur_ebitda) and pd.notna(prev_ebitda) and prev_ebitda != 0 else np.nan
+        ebitda_fwd_yoy = (ttm_ebitda - ttm_ebitda_prev)/ttm_ebitda_prev if pd.notna(ttm_ebitda) and pd.notna(ttm_ebitda_prev) and ttm_ebitda_prev != 0 else np.nan
+        ebitda_3_cagr = _cagr(value_at_years_ago(ebitda_s, df["date"], 3), cur_ebitda, 3)
+
+        ebit_3_cagr = _cagr(value_at_years_ago(ebit_s, df["date"], 3), ebit_s.iloc[latest_idx] if not ebit_s.isna().all() else np.nan, 3)
+        net_3_cagr = _cagr(value_at_years_ago(net_s, df["date"], 3), net_s.iloc[latest_idx] if not net_s.isna().all() else np.nan, 3)
+
+        # EPS
+        cur_eps = eps_s.iloc[latest_idx] if not eps_s.isna().all() else np.nan
+        eps_yoy = (cur_eps - prev_eps)/prev_eps if pd.notna(cur_eps) and pd.notna(prev_eps) and prev_eps != 0 else np.nan
+        eps_fwd_yoy = (ttm_eps - ttm_eps_prev)/ttm_eps_prev if pd.notna(ttm_eps) and pd.notna(ttm_eps_prev) and ttm_eps_prev != 0 else np.nan
+        eps_3_cagr = _cagr(value_at_years_ago(eps_s, df["date"], 3), cur_eps, 3)
+
+        # Tangible book value 3y
+        tang_3_cagr = _cagr(value_at_years_ago(tang_book_s, df["date"], 3), tang_book_s.iloc[latest_idx] if not tang_book_s.isna().all() else np.nan, 3)
+
+        assets_3_cagr = _cagr(value_at_years_ago(assets_s, df["date"], 3), assets_s.iloc[latest_idx] if not assets_s.isna().all() else np.nan, 3)
+
+        # Levered FCF 3y
+        if fcf_s.notna().any():
+            fcf_3_cagr = _cagr(value_at_years_ago(fcf_s, df["date"], 3), fcf_s.iloc[latest_idx] if not fcf_s.isna().all() else np.nan, 3)
+        else:
+            levered = opcf_s - capex_s if (opcf_s.notna().any() and capex_s.notna().any()) else pd.Series([np.nan]*len(df))
+            fcf_3_cagr = _cagr(value_at_years_ago(levered, df["date"], 3), levered.iloc[latest_idx] if levered.notna().any() else np.nan, 3)
+
+        # store results
+        results["Revenue Growth (YoY)"][ticker] = revenue_yoy
+        results["Revenue Growth (FWD TTM YoY)"][ticker] = revenue_fwd_yoy
+        results["Revenue 3 Year (CAGR)"][ticker] = rev_3_cagr
+        results["Revenue 5 Year (CAGR)"][ticker] = rev_5_cagr
+        results["EBITDA Growth (YoY)"][ticker] = ebitda_yoy
+        results["EBITDA Growth (FWD TTM YoY)"][ticker] = ebitda_fwd_yoy
+        results["EBITDA 3 Year (CAGR)"][ticker] = ebitda_3_cagr
+        results["EBIT 3 Year (CAGR)"][ticker] = ebit_3_cagr
+        results["Net Income 3 Year (CAGR)"][ticker] = net_3_cagr
+        results["EPS Growth Diluted (YoY)"][ticker] = eps_yoy
+        results["EPS Growth Diluted (FWD TTM YoY)"][ticker] = eps_fwd_yoy
+        results["EPS Diluted 3 Year (CAGR)"][ticker] = eps_3_cagr
+        results["Tang Book Value 3 Year (CAGR)"][ticker] = tang_3_cagr
+        results["Total Assets 3 Year (CAGR)"][ticker] = assets_3_cagr
+        results["Levered FCF 3 Year (CAGR)"][ticker] = fcf_3_cagr
+
+    # Build DataFrame: metrics rows, tickers columns
+    tickers_present = sorted({t.strip().upper() for t in tickers if os.path.exists(os.path.join("data", f"{t.strip().upper()}.csv"))})
+    if not tickers_present:
+        return {"tables": [("Growth", pd.DataFrame())]}
+
+    df_out = pd.DataFrame({t: {m: results[m].get(t, np.nan) for m in metrics} for t in tickers_present})
+
+    # Format display DataFrame
+    df_display = pd.DataFrame(index=metrics)
+    for col in df_out.columns:
+        formatted = []
+        for m, v in df_out[col].items():
+            if "Growth" in m or "CAGR" in m or "EPS" in m:
+                formatted.append(_human_pct(v))
+            else:
+                formatted.append(_human_money(v))
+        df_display[col] = formatted
+    df_display.index = metrics
+
+    return {"tables": [("Growth", df_display)]}
+
+
+def compare_profitability_tool(tickers: List[str]):
+    """
+    Compare profitability metrics across multiple tickers.
+    Returns: {"tables":[("Profitability", df_display)]}
+    """
+    metrics = [
+        "Gross Profit Margin",
+        "EBIT Margin",
+        "EBITDA Margin",
+        "Net Income Margin",
+        "Levered FCF Margin",
+        "Return on Equity",
+        "Return on Assets",
+        "Return on Total Capital",
+        "Cash From Operations (TTM)",
+        "Revenue Per Employee",
+        "Net Income Per Employee",
+        "Asset Turnover"
+    ]
+
+    results = {m: {} for m in metrics}
+    tickers_upper = [t.strip().upper() for t in tickers]
+
+    for ticker in tickers_upper:
+        path = os.path.join("data", f"{ticker}.csv")
+        if not os.path.exists(path):
+            continue
+        df = pd.read_csv(path, dtype=str)
+        if "date" not in df.columns:
+            continue
+        if "symbol" in df.columns:
+            df = df[df["symbol"].astype(str).str.upper() == ticker]
+        if df.empty:
+            continue
+
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+        df = df.dropna(subset=["date"]).sort_values("date").reset_index(drop=True)
+
+        def get_col(name):
+            return df[name].apply(_parse_number_str) if name in df.columns else pd.Series([np.nan]*len(df))
+
+        revenue_s = get_col("revenue")
+        gross_s = get_col("grossProfit")
+        ebitda_s = get_col("ebitda")
+        ebit_s = get_col("operatingIncome")
+        net_s = get_col("netIncome")
+        fcf_s = get_col("freeCashFlow")
+        opcf_s = get_col("operatingCashFlow")
+        capex_s = get_col("capitalExpenditure")
+        assets_s = get_col("totalAssets") if "totalAssets" in df.columns else get_col("assets")
+        equity_s = get_col("totalStockholdersEquity") if "totalStockholdersEquity" in df.columns else get_col("totalEquity")
+        employees_s = get_col("fullTimeEmployees") if "fullTimeEmployees" in df.columns else get_col("employees")
+
+        latest_idx = df["date"].idxmax()
+        # latest values
+        rev_cur = revenue_s.iloc[latest_idx] if not revenue_s.isna().all() else np.nan
+        gross_cur = gross_s.iloc[latest_idx] if not gross_s.isna().all() else np.nan
+        ebitda_cur = ebitda_s.iloc[latest_idx] if not ebitda_s.isna().all() else np.nan
+        ebit_cur = ebit_s.iloc[latest_idx] if not ebit_s.isna().all() else np.nan
+        net_cur = net_s.iloc[latest_idx] if not net_s.isna().all() else np.nan
+        fcf_cur = fcf_s.iloc[latest_idx] if not fcf_s.isna().all() else np.nan
+
+        gross_margin = gross_cur / rev_cur if pd.notna(gross_cur) and pd.notna(rev_cur) and rev_cur != 0 else np.nan
+        ebit_margin = ebit_cur / rev_cur if pd.notna(ebit_cur) and pd.notna(rev_cur) and rev_cur != 0 else np.nan
+        ebitda_margin = ebitda_cur / rev_cur if pd.notna(ebitda_cur) and pd.notna(rev_cur) and rev_cur != 0 else np.nan
+        net_margin = net_cur / rev_cur if pd.notna(net_cur) and pd.notna(rev_cur) and rev_cur != 0 else np.nan
+
+        # Levered FCF margin
+        if not fcf_s.isna().all():
+            levered_fcf = fcf_cur
+        elif not opcf_s.isna().all() and not capex_s.isna().all():
+            levered_fcf = opcf_s.iloc[latest_idx] - capex_s.iloc[latest_idx]
+        else:
+            levered_fcf = np.nan
+        levered_fcf_margin = levered_fcf / rev_cur if pd.notna(levered_fcf) and pd.notna(rev_cur) and rev_cur != 0 else np.nan
+
+        roe = net_cur / equity_s.iloc[latest_idx] if pd.notna(net_cur) and pd.notna(equity_s.iloc[latest_idx]) and equity_s.iloc[latest_idx] != 0 else np.nan
+        roa = net_cur / assets_s.iloc[latest_idx] if pd.notna(net_cur) and pd.notna(assets_s.iloc[latest_idx]) and assets_s.iloc[latest_idx] != 0 else np.nan
+
+        total_capital = None
+        debt_s = get_col("totalDebt") if "totalDebt" in df.columns else (get_col("longTermDebt") + get_col("shortTermDebt") if ("longTermDebt" in df.columns or "shortTermDebt" in df.columns) else pd.Series([np.nan]*len(df)))
+        if pd.notna(equity_s.iloc[latest_idx]) and pd.notna(debt_s.iloc[latest_idx]):
+            total_capital = equity_s.iloc[latest_idx] + debt_s.iloc[latest_idx]
+        elif pd.notna(assets_s.iloc[latest_idx]):
+            total_capital = assets_s.iloc[latest_idx]
+        rotc = net_cur / total_capital if pd.notna(net_cur) and pd.notna(total_capital) and total_capital != 0 else np.nan
+
+        # Cash from operations (TTM)
+        if len(df) >= 4:
+            cfo_ttm = opcf_s.tail(4).sum()
+        else:
+            cfo_ttm = opcf_s.iloc[latest_idx] if not opcf_s.isna().all() else np.nan
+
+        emp_cur = employees_s.iloc[latest_idx] if not employees_s.isna().all() else np.nan
+        rev_per_emp = rev_cur / emp_cur if pd.notna(rev_cur) and pd.notna(emp_cur) and emp_cur != 0 else np.nan
+        net_per_emp = net_cur / emp_cur if pd.notna(net_cur) and pd.notna(emp_cur) and emp_cur != 0 else np.nan
+
+        asset_turnover = rev_cur / assets_s.iloc[latest_idx] if pd.notna(rev_cur) and pd.notna(assets_s.iloc[latest_idx]) and assets_s.iloc[latest_idx] != 0 else np.nan
+
+        results["Gross Profit Margin"][ticker] = gross_margin
+        results["EBIT Margin"][ticker] = ebit_margin
+        results["EBITDA Margin"][ticker] = ebitda_margin
+        results["Net Income Margin"][ticker] = net_margin
+        results["Levered FCF Margin"][ticker] = levered_fcf_margin
+        results["Return on Equity"][ticker] = roe
+        results["Return on Assets"][ticker] = roa
+        results["Return on Total Capital"][ticker] = rotc
+        results["Cash From Operations (TTM)"][ticker] = cfo_ttm
+        results["Revenue Per Employee"][ticker] = rev_per_emp
+        results["Net Income Per Employee"][ticker] = net_per_emp
+        results["Asset Turnover"][ticker] = asset_turnover
+
+    tickers_present = sorted({t.strip().upper() for t in tickers if os.path.exists(os.path.join("data", f"{t.strip().upper()}.csv"))})
+    if not tickers_present:
+        return {"tables": [("Profitability", pd.DataFrame())]}
+
+    df_out = pd.DataFrame({t: {m: results[m].get(t, np.nan) for m in metrics} for t in tickers_present})
+
+    df_display = pd.DataFrame(index=metrics)
+    for col in df_out.columns:
+        formatted = []
+        for m, v in df_out[col].items():
+            if "Margin" in m or "Return" in m:
+                formatted.append(_human_pct(v))
+            elif "Cash From Operations" in m:
+                formatted.append(_human_money(v))
+            elif "Per Employee" in m:
+                formatted.append(_human_money(v))
+            elif "Asset Turnover" in m:
+                formatted.append(_human_plain(v, decimals=2))
+            else:
+                formatted.append(_human_money(v))
+        df_display[col] = formatted
+    df_display.index = metrics
+
+    return {"tables": [("Profitability", df_display)]}
+
+
+# ----------------------
+# Resilient Yahoo helper (kept)
+# ----------------------
 def _make_session() -> requests.Session:
     s = requests.Session()
-    # Robust retry policy (handles 429 + common 5xx)
     retry = Retry(
         total=6,
         connect=3,
         read=3,
-        backoff_factor=0.7,             # exponential backoff: 0.7, 1.4, 2.8, ...
+        backoff_factor=0.7,
         status_forcelist=(429, 500, 502, 503, 504),
         allowed_methods=frozenset(["GET", "POST"]),
         raise_on_status=False,
-        respect_retry_after_header=True, # honor Retry-After
+        respect_retry_after_header=True,
     )
     s.mount("https://", HTTPAdapter(max_retries=retry))
     s.headers.update({
@@ -276,30 +777,24 @@ def _make_session() -> requests.Session:
     })
     return s
 
+
 def _yahoo_news_search(query: str, count: int = 5, region: str = "US", lang: str = "en-US"):
-    """
-    Resilient Yahoo Finance news search with retries, backoff, and host fallback.
-    (Minimal changes: switch to news-only endpoint + adjust params/fields.)
-    """
     session = _make_session()
     params = {
         "q": query,
-        "count": max(1, int(count)),   # was newsCount
-        "start": 0,                    # optional; keeps first page
+        "count": max(1, int(count)),
+        "start": 0,
         "region": region,
         "lang": lang,
     }
-
-    # Use the news-only endpoints
     hosts = [
         "https://query1.finance.yahoo.com/v1/news/search",
         "https://query2.finance.yahoo.com/v1/news/search",
     ]
-
     last_err = None
     for host in hosts:
         try:
-            time.sleep(random.uniform(0.2, 0.6))  # jitter
+            time.sleep(random.uniform(0.2, 0.6))
             r = session.get(host, params=params, timeout=12)
             if r.status_code == 429:
                 retry_after = r.headers.get("Retry-After")
@@ -312,8 +807,6 @@ def _yahoo_news_search(query: str, count: int = 5, region: str = "US", lang: str
                         pass
             r.raise_for_status()
             data = r.json()
-
-            # news/search often returns under "items"; fall back to "news"
             raw = data.get("items") or data.get("news") or []
             items = [{
                 "title": n.get("title"),
@@ -321,17 +814,12 @@ def _yahoo_news_search(query: str, count: int = 5, region: str = "US", lang: str
                 "link": n.get("link") or n.get("url"),
                 "time": n.get("pubDate") or n.get("providerPublishTime"),
             } for n in raw]
-
-            # newest first if timestamps exist
             items.sort(key=lambda x: (x["time"] or 0), reverse=True)
-
             return items[:count]
         except requests.RequestException as e:
             last_err = e
             time.sleep(random.uniform(0.5, 1.2))
-
     raise RuntimeError(f"Yahoo Finance news search failed after retries: {last_err}")
-
 
 # def finance_news_digest_tool(
 #     query: str,
@@ -449,194 +937,3 @@ def _yahoo_news_search(query: str, count: int = 5, region: str = "US", lang: str
 #     }
 
 
-def _parse_period_to_offset(period: str) -> DateOffset:
-    """
-    Convert a yfinance-style period string ('1mo','3mo','1y','5d','2wk') to a pandas DateOffset.
-    """
-    if period == "max":
-        # Fallback: ~30 years. Adjust if you want.
-        return DateOffset(years=30)
-    m = re.fullmatch(r"(\d+)([a-zA-Z]+)", period.strip())
-    if not m:
-        raise ValueError(f"Unsupported period format: {period}")
-    n, unit = int(m.group(1)), m.group(2).lower()
-    if unit in ("d", "day", "days"):
-        return DateOffset(days=n)
-    if unit in ("wk", "w", "week", "weeks"):
-        return DateOffset(weeks=n)
-    if unit in ("mo", "month", "months"):
-        return DateOffset(months=n)
-    if unit in ("y", "yr", "year", "years"):
-        return DateOffset(years=n)
-    raise ValueError(f"Unsupported period unit: {unit}")
-
-def _interval_to_timedelta(interval: str) -> timedelta:
-    """
-    Approximate bar duration for common yfinance intervals.
-    """
-    interval = interval.lower().strip()
-    if interval.endswith("m"):  # minutes
-        return timedelta(minutes=int(interval[:-1]))
-    if interval.endswith("h"):  # hours
-        return timedelta(hours=int(interval[:-1]))
-    if interval == "1d":
-        return timedelta(days=1)
-    if interval == "5d":
-        return timedelta(days=5)
-    if interval == "1wk":
-        return timedelta(weeks=1)
-    if interval == "1mo":
-        # Use ~30 days for approximation
-        return timedelta(days=30)
-    if interval == "3mo":
-        return timedelta(days=90)
-    # Default fallback
-    return timedelta(days=1)
-
-def moving_average_tool(
-    ticker: str,
-    period: str = "1y",
-    interval: str = "1d",
-    windows=(20,),
-):
-    """
-    Fetch OHLCV for `ticker`, compute SMAs with proper lookback so the
-    SMA starts at the beginning of the requested period, and plot.
-
-    - Extra data from further back is used ONLY to compute the SMA.
-    - The visible Close line is clipped to the requested period.
-    - The SMA line is shown starting at the first timestamp of the requested period.
-    """
-    ticker = ticker.strip().upper()
-    result = {"text": "", "image_path": None}
-
-    # Validate windows
-    try:
-        windows = [int(w) for w in windows if int(w) > 1]
-        if not windows:
-            result["text"] = "No valid moving-average windows provided (need integers > 1)."
-            return result
-    except Exception:
-        result["text"] = "Invalid `windows` argument; provide integers > 1."
-        return result
-
-    max_win = max(windows)
-
-    # Compute visible window [visible_start, visible_end]
-    now = datetime.now(timezone.utc)
-    try:
-        period_offset = _parse_period_to_offset(period)
-    except Exception as e:
-        result["text"] = f"Invalid period '{period}': {e}"
-        return result
-
-    visible_end = now
-    visible_start = (now - period_offset)
-
-    # Compute lookback needed for SMA calculation
-    bar_delta = _interval_to_timedelta(interval)
-    # Add a small buffer (e.g., 20%) to cover non-trading days / sparse bars
-    extra_seconds = int((max_win - 1) * bar_delta.total_seconds() * 1.2)
-    lookback_start = visible_start - timedelta(seconds=extra_seconds)
-
-    # 1) Fetch extended data using start/end so we can control lookback
-    try:
-        t = yf.Ticker(ticker)
-        hist = t.history(start=lookback_start, end=visible_end, interval=interval, auto_adjust=False)
-        if hist.empty:
-            result["text"] = f"No data found for {ticker}."
-            return result
-        hist = hist.reset_index()  # ensures a 'Date' column
-    except Exception as e:
-        result["text"] = f"Error fetching data for {ticker}: {e}"
-        return result
-
-    # 2) Compute SMAs on the EXTENDED data so first visible point has a valid SMA
-    for w in windows:
-        if len(hist) >= w:
-            hist[f"SMA_{w}"] = hist["Close"].rolling(window=w).mean()
-
-    # 3) Build masks for plotting
-    # Visible range mask: we only *display* Close inside requested period
-    mask_visible = hist["Date"] >= pd.Timestamp(visible_start)
-
-    # 4) Plot
-    fig, ax = plt.subplots()
-
-    # Plot Close ONLY in visible window
-    vis = hist.loc[mask_visible]
-    ax.plot(vis["Date"], vis["Close"], marker="o", label="Close")
-
-    # Plot SMA lines starting at the first visible timestamp
-    for w in windows:
-        col = f"SMA_{w}"
-        if col in hist.columns:
-            sma_vis = hist.loc[mask_visible, ["Date", col]].dropna()
-            # If we fetched enough lookback, we should have a value at the first visible point.
-            if not sma_vis.empty:
-                ax.plot(sma_vis["Date"], sma_vis[col], linewidth=2, label=f"SMA {w}")
-
-    ax.set_title(f"{ticker} Close with Moving Averages")
-    ax.set_xlabel("Date")
-    ax.set_ylabel("Price (USD)")
-    ax.legend(loc="best")
-    fig.autofmt_xdate()
-
-    # 5) Save
-    tmpdir = tempfile.gettempdir()
-    fname = f"{ticker}_ma_{int(datetime.now(timezone.utc).timestamp())}.png"
-    path = os.path.join(tmpdir, fname)
-    plt.savefig(path, bbox_inches="tight")
-    plt.close(fig)
-
-    result["image_path"] = path
-    result["text"] = (
-        f"Plotted {ticker} Close ({period}, {interval}) with SMAs: "
-        + ", ".join(str(w) for w in windows)
-        + ". Extra lookback fetched to start SMA at the beginning of the visible window."
-    )
-    return result
-
-
-def past_history_tool(ticker: str,  period: str = "1mo", interval: str = "1d"):
-    """
-    A single finance tool that:
-    - Gets stock data for a ticker
-
-
-    Returns: dict with keys 'text', 'image_path' (optional)
-    """
-    ticker = ticker.strip().upper()
-    result = {"text": "", "image_path": None}
-
-    # 1. Get data
-    try:
-        t = yf.Ticker(ticker)
-        hist = t.history(period=period, interval=interval)
-        if hist.empty:
-            result["text"] = f"No data found for {ticker}."
-            return result
-        hist = hist.reset_index()
-    except Exception as e:
-        result["text"] = f"Error fetching data for {ticker}: {e}"
-        return result
-    
-    # 2. Plot if needed
-    # if action in ("plot"):
-    fig, ax = plt.subplots()
-    ax.plot(hist["Date"], hist["Close"], marker="o")
-    ax.set_title(f"{ticker} Closing Prices")
-    ax.set_xlabel("Date")
-    ax.set_ylabel("Price (USD)")
-    fig.autofmt_xdate()
-
-    tmpdir = tempfile.gettempdir()
-    fname = f"{ticker}_plot_{int(datetime.utcnow().timestamp())}.png"
-    path = os.path.join(tmpdir, fname)
-    plt.savefig(path, bbox_inches='tight')
-    plt.close(fig)
-
-    result["image_path"] = path
-
-
-    return result

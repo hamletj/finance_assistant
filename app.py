@@ -5,8 +5,14 @@ import json
 import pandas as pd
 from openai import OpenAI
 
-# import your tools
-from tools import moving_average_tool, past_history_tool, generate_financial_summary_tool
+# import your tools (including the two new ones)
+from tools import (
+    moving_average_tool,
+    past_history_tool,
+    generate_financial_summary_tool,
+    compare_growth_tool,
+    compare_profitability_tool,
+)
 
 st.set_page_config(page_title="Finance AI Assistant", page_icon="💹", layout="wide")
 
@@ -17,7 +23,7 @@ if not OPENAI_API_KEY:
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# Define the tools metadata for the LLM
+# Define the tools metadata for the LLM (add compare_growth and compare_profitability)
 FUNCTIONS = [
     {
         "name": "generate_financial_summary_tool",
@@ -28,8 +34,8 @@ FUNCTIONS = [
                 "ticker": {"type": "string", "description": "Stock ticker, e.g., AAPL"},
                 "num_quarters": {"type": "integer", "description": "e.g., 5, 10"},
             },
-            "required": ["ticker"]
-        }
+            "required": ["ticker"],
+        },
     },
     {
         "name": "past_history_tool",
@@ -39,10 +45,10 @@ FUNCTIONS = [
             "properties": {
                 "ticker": {"type": "string", "description": "Stock ticker, e.g., AAPL"},
                 "period": {"type": "string", "description": "e.g., '1mo', '3mo', '1y'"},
-                "interval": {"type": "string", "description": "e.g., '1d', '1wk'"}
+                "interval": {"type": "string", "description": "e.g., '1d', '1wk'"},
             },
-            "required": ["ticker"]
-        }
+            "required": ["ticker"],
+        },
     },
     {
         "name": "moving_average_tool",
@@ -50,41 +56,73 @@ FUNCTIONS = [
         "parameters": {
             "type": "object",
             "properties": {
-                "ticker":   {"type": "string", "description": "Stock ticker, e.g., AAPL"},
-                "period":   {"type": "string", "description": "e.g., '1mo', '3mo', '1y'"},
+                "ticker": {"type": "string", "description": "Stock ticker, e.g., AAPL"},
+                "period": {"type": "string", "description": "e.g., '1mo', '3mo', '1y'"},
                 "interval": {"type": "string", "description": "e.g., '1d', '1wk', '1h'"},
-                "windows":  {
+                "windows": {
                     "type": "array",
                     "description": "SMA window sizes in periods (integers > 1), e.g., [5, 20, 50].",
                     "items": {"type": "integer", "minimum": 2},
                     "minItems": 1,
-                    "default": [20]
+                    "default": [20],
+                },
+            },
+            "required": ["ticker"],
+        },
+    },
+    {
+        "name": "compare_growth_tool",
+        "description": "Compare growth metrics across multiple tickers.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "tickers": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of stock tickers, e.g., ['AAPL','MSFT','GOOG']",
                 }
             },
-            "required": ["ticker"]
-        }
-    }
+            "required": ["tickers"],
+        },
+    },
+    {
+        "name": "compare_profitability_tool",
+        "description": "Compare profitability metrics across multiple tickers.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "tickers": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of stock tickers, e.g., ['AAPL','MSFT','GOOG']",
+                }
+            },
+            "required": ["tickers"],
+        },
+    },
 ]
 
-SYSTEM_PROMPT = "You are a finance assistant. If it's a general question, you don't need to select a tool. Just answer. If it's a question highly releted to the tools, select tools to fulfill requests."
+SYSTEM_PROMPT = "You are a finance assistant. If it's a general question, you don't need to select a tool. Just answer. If it's a question highly related to the tools, select tools to fulfill requests."
 
 def run_agent(user_input: str):
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": user_input}
+        {"role": "user", "content": user_input},
     ]
 
     tool_registry = {
         "past_history_tool": past_history_tool,
         "moving_average_tool": moving_average_tool,
         "generate_financial_summary_tool": generate_financial_summary_tool,
+        "compare_growth_tool": compare_growth_tool,
+        "compare_profitability_tool": compare_profitability_tool,
     }
 
     resp = client.chat.completions.create(
-        model="gpt-5-mini", #"gpt-4o-mini",
+        model="gpt-5-mini",  # keep your chosen model
         messages=messages,
         functions=FUNCTIONS,
-        function_call="auto"
+        function_call="auto",
     )
 
     message = resp.choices[0].message
@@ -113,13 +151,14 @@ def run_agent(user_input: str):
 
     return {"text": (message.content or "").strip()}
 
+
 # ---------------- Streamlit UI ----------------
 st.title("💹 Finance AI Assistant — Tool-enabled")
 
 if "history" not in st.session_state:
     st.session_state.history = []
 
-user_input = st.chat_input("Ask me something like 'summarize A' or 'plot MSFT'...")
+user_input = st.chat_input("Ask me something like 'summarize A' or 'compare growth of AAPL, MSFT, NVDA'...")
 
 if user_input:
     with st.spinner("Thinking..."):
@@ -137,10 +176,11 @@ for chat in st.session_state.history:
         st.write(chat.get("user", ""))
 
     with st.chat_message("assistant"):
+        # 1) plain text (if any)
         if chat.get("text"):
             st.write(chat["text"])
 
-        # Only show Financial Summary section if a table exists
+        # 2) formatted financial summary (existing)
         pivot_display = chat.get("pivot_display")
         if pivot_display is not None:
             try:
@@ -152,6 +192,21 @@ for chat in st.session_state.history:
             except Exception as e:
                 st.error(f"Could not render financial summary: {e}")
 
+        # 3) any tables returned by compare tools (list of (title, DataFrame))
+        tables = chat.get("tables")
+        if tables:
+            for title, table in tables:
+                try:
+                    st.subheader(title)
+                    # if the tool returned a dict or unexpected object, just show it
+                    if isinstance(table, dict):
+                        st.write(table)
+                    else:
+                        st.dataframe(table)
+                except Exception as e:
+                    st.write(f"Could not render table '{title}': {e}")
+
+        # 4) image or plot
         if chat.get("image_path"):
             try:
                 st.image(chat["image_path"])
@@ -159,4 +214,4 @@ for chat in st.session_state.history:
                 st.write("Could not display image:", e)
 
 st.markdown("---")
-st.caption("This app routes user queries to tools. The financial summary tool shows formatted quarterly metrics when available.")
+st.caption("This app routes user queries to tools. Use natural language (e.g., 'compare growth of AAPL, MSFT').")

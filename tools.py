@@ -272,31 +272,59 @@ def past_history_tool(ticker: str, period: str = "1mo", interval: str = "1d"):
 
 
 # ----------------------
-# Original generate_financial_summary_tool (kept)
+# Original generate_financial_summary_tool
 # ----------------------
 def generate_financial_summary_tool(ticker: str, num_quarters: int = 5):
     """
     Generate a Tesla-style financial summary for a given ticker.
     Reads data/{TICKER}.csv, parses numbers, builds pivot, and formats output.
+
+    Prioritization for valuation metrics:
+    - If CSV contains a column matching peratio (e.g., 'peratio','peRatio','pe_ratio'), use it as P/E.
+    - If CSV contains a column matching priceToSalesRatio (e.g., 'priceToSalesRatio','price_to_sales','ps_ratio'), use it as P/S.
+    - Otherwise fall back to computing from price, sharesOutstanding, EPS.
+    - Forward P/E computed using: forward_p/e = p/e * (eps / epsEstimated) when epsEstimated exists.
     """
+    import os, re, numpy as np, pandas as pd
+
+    # reuse the shared parser from tools.py
     def parse_number(x):
         return _parse_number_str(x)
 
+    # formatting: keep 'x' for valuation ratios
     def fmt_value(val, metric_name):
         if pd.isna(val):
             return "-"
+        if metric_name in ["P/E", "Forward P/E", "P/S"]:
+            try:
+                return f"{float(val):.1f}x"
+            except Exception:
+                return "-"
         if "Margin" in metric_name:
             return f"{val * 100:.1f}%"
         if metric_name == "EPS Diluted (GAAP)":
             return f"{val:.2f}"
-        return f"{val / 1e9:.2f}B"
+        try:
+            return f"{val / 1e9:.2f}B"
+        except Exception:
+            return str(val)
+
+    # Helper: choose best column from df using candidate regexes (case-insensitive)
+    def find_col(cols, patterns):
+        lc_map = {c: c.lower() for c in cols}
+        for pat in patterns:
+            r = re.compile(pat, flags=re.IGNORECASE)
+            for orig, lc in lc_map.items():
+                if r.search(lc):
+                    return orig
+        return None
 
     path = os.path.join("data", f"{ticker.upper()}.csv")
     if not os.path.exists(path):
         raise FileNotFoundError(path)
 
     df = pd.read_csv(path)
-    # Filter by symbol column if present
+    # filter by symbol column if present
     if "symbol" in df.columns:
         df["symbol"] = df["symbol"].astype(str).str.upper()
         df = df[df["symbol"] == ticker.upper()]
@@ -304,11 +332,11 @@ def generate_financial_summary_tool(ticker: str, num_quarters: int = 5):
     if df.empty:
         raise ValueError(f"No rows for ticker {ticker}")
 
+    # --- detect which columns need parsing & coerce numeric-like columns ---
     protected = {"date", "symbol"}
     cols_to_parse = []
     coerced_to_numeric = []
 
-    # Decide which columns to parse
     for c in df.columns:
         if c in protected:
             continue
@@ -345,9 +373,11 @@ def generate_financial_summary_tool(ticker: str, num_quarters: int = 5):
                 df[c] = coerced
                 coerced_to_numeric.append(c)
 
+    # apply parsing for flagged columns
     for c in cols_to_parse:
         df[c] = df[c].apply(parse_number)
 
+    # --- map raw → pretty where possible (existing behavior) ---
     raw_to_pretty = {
         "revenue": "Total Revenues",
         "grossProfit": "Gross Profit",
@@ -363,15 +393,85 @@ def generate_financial_summary_tool(ticker: str, num_quarters: int = 5):
     }
     pretty_set = set(raw_to_pretty.values())
 
+    # --- discover candidate columns (do not assume standardized names) ---
+    cols = list(df.columns)
+
+    # price candidates
+    price_col = find_col(cols, [
+        r"\bclose\b", r"\badjclose\b", r"\bcloseprice\b", r"\bprice\b", r"\blastprice\b", r"\blast\b"
+    ])
+
+    # shares outstanding candidates
+    shares_col = find_col(cols, [
+        r"sharesoutstanding", r"shares_outstanding", r"commonstocksharesoutstanding",
+        r"weightedaverageshares", r"weighted_average_shares", r"\bshares\b"
+    ])
+
+    # eps (diluted) candidates
+    eps_col = find_col(cols, [
+        r"epsdilut", r"eps_dilut", r"\beps\b", r"basic_eps", r"diluted_eps", r"epsbasic", r"epsDiluted"
+    ])
+
+    # epsEstimated / forward EPS candidates (user prefers epsEstimated)
+    eps_est_col = find_col(cols, [
+        r"epsestimated", r"eps_estimated", r"epsestimate", r"eps_estimate", r"epsforward", r"forwardeps", r"eps_est"
+    ])
+
+    # forwardPE candidate in CSV (some CSVs may already include forwardPE)
+    forwardpe_col = find_col(cols, [r"forwardpe", r"forward_pe", r"fwdpe"])
+
+    # PRIORITY: peratio column for P/E
+    peratio_col = find_col(cols, [r"\bperatio\b", r"\bpe_ratio\b", r"\bpe\b", r"\bpeRatio\b", r"\bpeRatio\b"])
+
+    # PRIORITY: priceToSalesRatio column for P/S
+    pstosales_col = find_col(cols, [r"pricetosalesratio", r"price_to_sales", r"ps_ratio", r"priceToSalesRatio", r"p_to_s"])
+
+    # include discovered columns to keep list (so they survive copying)
     keep_cols = ["date"]
     keep_cols += [c for c in raw_to_pretty.keys() if c in df.columns]
     keep_cols += [c for c in pretty_set if c in df.columns]
+    for extra in (price_col, shares_col, eps_col, eps_est_col, forwardpe_col, peratio_col, pstosales_col):
+        if extra and extra not in keep_cols:
+            keep_cols.append(extra)
+
+    # dedupe preserve order
     keep_cols = [c for i, c in enumerate(keep_cols) if c not in keep_cols[:i]]
 
+    # create working dataframe with only relevant cols
     work = df[keep_cols].copy()
+
+    # rename known raw columns to pretty names where applicable
     rename_map = {raw: pretty for raw, pretty in raw_to_pretty.items() if raw in work.columns}
     work.rename(columns=rename_map, inplace=True)
 
+    # Normalize important columns into known keys if they exist under other names
+    # EPS Diluted
+    if "EPS Diluted (GAAP)" not in work.columns and eps_col and eps_col in work.columns:
+        work["EPS Diluted (GAAP)"] = work[eps_col]
+
+    # forwardPE
+    if "forwardPE" not in work.columns and forwardpe_col and forwardpe_col in work.columns:
+        work["forwardPE"] = work[forwardpe_col]
+
+    # epsEstimated
+    if "epsEstimated" not in work.columns and eps_est_col and eps_est_col in work.columns:
+        work["epsEstimated"] = work[eps_est_col]
+
+    # close price
+    if "close" not in work.columns and price_col and price_col in work.columns:
+        work["close"] = work[price_col]
+
+    # sharesOutstanding
+    if "sharesOutstanding" not in work.columns and shares_col and shares_col in work.columns:
+        work["sharesOutstanding"] = work[shares_col]
+
+    # peratio and priceToSalesRatio normalization (keep original names, but also create normalized keys)
+    if "peratio" not in work.columns and peratio_col and peratio_col in work.columns:
+        work["peratio"] = work[peratio_col]
+    if "priceToSalesRatio" not in work.columns and pstosales_col and pstosales_col in work.columns:
+        work["priceToSalesRatio"] = work[pstosales_col]
+
+    # now metrics order including valuation metrics
     metrics_order = [
         "Total Revenues",
         "Gross Profit",
@@ -384,17 +484,71 @@ def generate_financial_summary_tool(ticker: str, num_quarters: int = 5):
         "Adjusted EBITDA Margin",
         "Capital Expenditures",
         "Free Cash Flow",
+        "P/E",
+        "Forward P/E",
+        "P/S",
     ]
-    metrics = [m for m in metrics_order if m in work.columns]
 
+    # Filter to dates, sort and select last N quarters
     work["date"] = pd.to_datetime(work["date"], errors="coerce")
     work = work.dropna(subset=["date"]).sort_values("date")
     lastN = work.tail(num_quarters).copy()
     if lastN.empty:
         raise ValueError("No valid date rows for selected ticker/quarters.")
 
+    # --- Compute valuation metrics (prefer CSV peratio/priceToSalesRatio when present) ---
+    # Ensure numeric dtype for required computed columns
+    def safe_get_series(w, col):
+        return w[col] if col in w.columns else pd.Series([np.nan] * len(w), index=w.index)
+
+    # series for computation
+    price_ser = safe_get_series(lastN, "close").astype(float, errors="ignore")
+    shares_ser = safe_get_series(lastN, "sharesOutstanding").astype(float, errors="ignore")
+    eps_ser = safe_get_series(lastN, "EPS Diluted (GAAP)").astype(float, errors="ignore")
+    eps_est_ser = safe_get_series(lastN, "epsEstimated").astype(float, errors="ignore")
+
+    # 1) P/E: prefer peratio column if present
+    lastN["P/E"] = np.nan
+    if "peratio" in lastN.columns and lastN["peratio"].notna().any():
+        # parse peratio if it contains 'x' or strings
+        lastN.loc[lastN["peratio"].notna(), "P/E"] = lastN.loc[lastN["peratio"].notna(), "peratio"].apply(lambda x: parse_number(x) if not pd.api.types.is_numeric_dtype(type(x)) else x)
+    else:
+        # fallback: price / eps (latest quarterly EPS)
+        mask_pe = price_ser.notna() & eps_ser.notna() & (eps_ser != 0)
+        if mask_pe.any():
+            lastN.loc[mask_pe, "P/E"] = price_ser.loc[mask_pe] / eps_ser.loc[mask_pe]
+
+    # 2) P/S: prefer priceToSalesRatio column if present
+    lastN["P/S"] = np.nan
+    if "priceToSalesRatio" in lastN.columns and lastN["priceToSalesRatio"].notna().any():
+        lastN.loc[lastN["priceToSalesRatio"].notna(), "P/S"] = lastN.loc[lastN["priceToSalesRatio"].notna(), "priceToSalesRatio"].apply(lambda x: parse_number(x) if not pd.api.types.is_numeric_dtype(type(x)) else x)
+    else:
+        # fallback compute marketcap / revenue (price * shares / revenue)
+        mask_ps = price_ser.notna() & shares_ser.notna() & ("Total Revenues" in lastN.columns) & (lastN["Total Revenues"] != 0)
+        if mask_ps.any():
+            lastN.loc[mask_ps, "P/S"] = (price_ser.loc[mask_ps] * shares_ser.loc[mask_ps]) / lastN.loc[mask_ps, "Total Revenues"]
+
+    # 3) Forward P/E: if forwardPE present in CSV use it; otherwise compute using formula:
+    #    forward_p/e = p/e * (eps / epsEstimated)
+    lastN["Forward P/E"] = np.nan
+    if "forwardPE" in lastN.columns and lastN["forwardPE"].notna().any():
+        lastN.loc[lastN["forwardPE"].notna(), "Forward P/E"] = lastN.loc[lastN["forwardPE"].notna(), "forwardPE"].apply(lambda x: parse_number(x) if not pd.api.types.is_numeric_dtype(type(x)) else x)
+    else:
+        # compute where possible
+        mask_fpe_compute = lastN["P/E"].notna() & eps_ser.notna() & eps_est_ser.notna() & (eps_est_ser != 0)
+        if mask_fpe_compute.any():
+            p_over_e = lastN.loc[mask_fpe_compute, "P/E"].astype(float)
+            eps_cur = eps_ser.loc[mask_fpe_compute].astype(float)
+            eps_est = eps_est_ser.loc[mask_fpe_compute].astype(float)
+            lastN.loc[mask_fpe_compute, "Forward P/E"] = p_over_e * (eps_cur / eps_est)
+
+    # Rebuild metrics list dynamically from metrics_order but only include those present in lastN
+    metrics = [m for m in metrics_order if m in lastN.columns]
+
+    # Build pivot (metrics as rows, last N quarters ascending as columns)
     pivot = lastN.set_index("date")[metrics].T
 
+    # --- Compute YoY for metrics where possible (only for latest quarter) ---
     latest_dt = lastN["date"].max()
     prev_year_dt = latest_dt - pd.DateOffset(years=1)
     prev_rows = work[work["date"] == prev_year_dt]
@@ -407,8 +561,8 @@ def generate_financial_summary_tool(ticker: str, num_quarters: int = 5):
     yoy_vals = []
     if not prev_rows.empty:
         for m in pivot.index:
-            cur = work.loc[work["date"] == latest_dt, m]
-            prv = work.loc[work["date"].isin(prev_rows["date"]), m]
+            cur = work.loc[work["date"] == latest_dt, m] if m in work.columns else pd.Series([np.nan])
+            prv = work.loc[work["date"].isin(prev_rows["date"]), m] if m in work.columns else pd.Series([np.nan])
             cur_val = cur.iloc[0] if not cur.empty else np.nan
             prv_val = prv.iloc[0] if not prv.empty else np.nan
             if pd.notna(cur_val) and pd.notna(prv_val) and prv_val != 0:
@@ -417,8 +571,10 @@ def generate_financial_summary_tool(ticker: str, num_quarters: int = 5):
                 yoy_vals.append(np.nan)
         pivot["YoY %"] = yoy_vals
 
+    # Friendly column names for pivot
     pivot.columns = [c.strftime("%Y-%m-%d") if isinstance(c, (pd.Timestamp, np.datetime64)) else c for c in pivot.columns]
 
+    # Build display-ready (formatted) pivot
     pivot_display = pivot.copy()
     for col in pivot_display.columns:
         if col == "YoY %":

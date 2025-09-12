@@ -958,7 +958,20 @@ def compare_valuation_tool(tickers: List[str]):
             continue
 
         def get_col(name):
-            return df[name].apply(_parse_number_str) if name in df.columns else pd.Series([np.nan] * len(df))
+            """
+            Case-insensitive column lookup + numeric parsing.
+            Returns a pd.Series aligned with df.index containing parsed numbers or NaN.
+            """
+            name_lower = name.lower()
+            match = None
+            for col in df.columns:
+                if col.lower() == name_lower:
+                    match = col
+                    break
+
+            if match is None:
+                return pd.Series([np.nan] * len(df), index=df.index)
+            return df[match].apply(_parse_number_str)
 
         # possible column names (common)
         ev_s = get_col("enterpriseValue")

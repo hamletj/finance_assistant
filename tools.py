@@ -906,96 +906,167 @@ def compare_profitability_tool(tickers: List[str]):
 
     return {"tables": [("Profitability", df_display)]}
 
-def compare_valuation_tool(file_paths: list[str]) -> pd.DataFrame:
+def compare_valuation_tool(tickers: List[str]):
     """
     Generate a valuation comparison table across multiple tickers.
-    Auto-detects available fields, computes both TTM and Forward
-    valuation ratios, and aligns them in a table.
+    Reads data/<TICKER>.csv for each ticker, auto-detects fields,
+    computes TTM and Forward valuation ratios, and returns a display table.
 
-    Parameters
-    ----------
-    file_paths : list[str]
-        List of file paths to CSVs containing financial data.
-
-    Returns
-    -------
-    pd.DataFrame
-        Comparison table with metrics as rows and tickers as columns.
+    Returns: {"tables":[("Valuation", df_display)]}
     """
+    metrics = [
+        "P/E GAAP (TTM)",
+        "P/E GAAP (FWD)",
+        "P/S (TTM)",
+        "EV/Sales (TTM)",
+        "EV/Sales (FWD)",
+        "EV/EBITDA (TTM)",
+        "EV/EBITDA (FWD)",
+        "Price/Book (TTM)",
+        "Price/Cash Flow (TTM)",
+        "PEG (TTM)",
+        "PEG (FWD)",
+    ]
 
-    results = {}
+    results = {m: {} for m in metrics}
+    tickers_upper = [t.strip().upper() for t in tickers]
 
-    for file_path in file_paths:
-        df = pd.read_csv(file_path)
-        latest = df.iloc[-1].to_dict()
-        ticker = latest.get("symbol", os.path.basename(file_path).split(".")[0])
+    for ticker in tickers_upper:
+        path = os.path.join("data", f"{ticker}.csv")
+        if not os.path.exists(path):
+            continue
 
-        metrics = {}
+        df = pd.read_csv(path, dtype=str)
+        if "date" not in df.columns:
+            # try lowercase date column
+            if "Date" in df.columns:
+                df = df.rename(columns={"Date": "date"})
+            else:
+                continue
 
-        # --- Get values if they exist ---
-        ev = latest.get("enterpriseValue", None)
-        eps = latest.get("eps", None)
-        eps_est = latest.get("epsEstimated", None)
-        rev = latest.get("revenue", None)
-        rev_est = latest.get("revenueEstimated", None)
-        ebitda = latest.get("ebitda", None)
-        ebitda_est = latest.get("ebitdaEstimated", None)
-        pe_ttm = latest.get("peratio", None)
-        ps_ttm = latest.get("priceToSalesRatio", None)
-        pb_ttm = latest.get("pbRatio", None)
-        mkt_cap = latest.get("marketCap", None)
-        ocf = latest.get("operatingCashFlow", None)
+        # filter by symbol column if present
+        if "symbol" in df.columns:
+            df = df[df["symbol"].astype(str).str.upper() == ticker]
 
-        # --- Metrics ---
-        metrics["P/E GAAP (TTM)"] = pe_ttm if pe_ttm is not None else "N/A"
-        metrics["P/S (TTM)"] = ps_ttm if ps_ttm is not None else "N/A"
+        if df.empty:
+            continue
 
-        # Forward P/E
-        if pe_ttm not in (None, 0) and eps not in (None, 0) and eps_est not in (None, 0):
-            metrics["P/E GAAP (FWD)"] = pe_ttm * (eps / eps_est)
+        # parse dates and sort
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+        df = df.dropna(subset=["date"]).sort_values("date").reset_index(drop=True)
+        if df.empty:
+            continue
+
+        def get_col(name):
+            return df[name].apply(_parse_number_str) if name in df.columns else pd.Series([np.nan] * len(df))
+
+        # possible column names (common)
+        ev_s = get_col("enterpriseValue")
+        eps_s = get_col("eps")
+        eps_est_s = get_col("epsEstimated") if "epsEstimated" in df.columns else get_col("epsEstimate")
+        rev_s = get_col("revenue")
+        rev_est_s = get_col("revenueEstimated") if "revenueEstimated" in df.columns else get_col("revenueEstimated")
+        ebitda_s = get_col("ebitda")
+        ebitda_est_s = get_col("ebitdaEstimated") if "ebitdaEstimated" in df.columns else get_col("ebitdaEstimate")
+        pe_ttm_s = get_col("peratio")
+        ps_ttm_s = get_col("priceToSalesRatio")
+        pb_ttm_s = get_col("pbRatio")
+        mkt_cap_s = get_col("marketCap")
+        ocf_s = get_col("operatingCashFlow")
+
+        latest_idx = df["date"].idxmax()
+
+        ev = ev_s.iloc[latest_idx] if not ev_s.isna().all() else np.nan
+        eps = eps_s.iloc[latest_idx] if not eps_s.isna().all() else np.nan
+        eps_est = eps_est_s.iloc[latest_idx] if not eps_est_s.isna().all() else np.nan
+        rev = rev_s.iloc[latest_idx] if not rev_s.isna().all() else np.nan
+        rev_est = rev_est_s.iloc[latest_idx] if not rev_est_s.isna().all() else np.nan
+        ebitda = ebitda_s.iloc[latest_idx] if not ebitda_s.isna().all() else np.nan
+        ebitda_est = ebitda_est_s.iloc[latest_idx] if not ebitda_est_s.isna().all() else np.nan
+        pe_ttm = pe_ttm_s.iloc[latest_idx] if not pe_ttm_s.isna().all() else np.nan
+        ps_ttm = ps_ttm_s.iloc[latest_idx] if not ps_ttm_s.isna().all() else np.nan
+        pb_ttm = pb_ttm_s.iloc[latest_idx] if not pb_ttm_s.isna().all() else np.nan
+        mkt_cap = mkt_cap_s.iloc[latest_idx] if not mkt_cap_s.isna().all() else np.nan
+        ocf = ocf_s.iloc[latest_idx] if not ocf_s.isna().all() else np.nan
+
+        # --- Compute metrics (with safety checks) ---
+        # P/E TTM
+        results["P/E GAAP (TTM)"][ticker] = pe_ttm if not pd.isna(pe_ttm) else np.nan
+
+        # Forward P/E: convert current PE to forward via eps -> eps_est:
+        # forward_pe = price / eps_est = (price/eps) * (eps/eps_est) = pe_ttm * (eps / eps_est)
+        if pd.notna(pe_ttm) and pd.notna(eps) and pd.notna(eps_est) and eps_est != 0:
+            # allow eps to be zero (would be invalid) - check eps != 0
+            if eps != 0:
+                results["P/E GAAP (FWD)"][ticker] = pe_ttm * (eps / eps_est)
+            else:
+                # if eps == 0 but we have price info via marketCap & shares we could compute, but keep safe
+                results["P/E GAAP (FWD)"][ticker] = np.nan
         else:
-            metrics["P/E GAAP (FWD)"] = "N/A"
+            results["P/E GAAP (FWD)"][ticker] = np.nan
 
-        # EV/Sales TTM
-        if ev not in (None, 0) and rev not in (None, 0):
-            metrics["EV/Sales (TTM)"] = ev / rev
-        else:
-            metrics["EV/Sales (TTM)"] = "N/A"
+        # P/S (TTM)
+        results["P/S (TTM)"][ticker] = ps_ttm if not pd.isna(ps_ttm) else np.nan
 
-        # EV/Sales FWD
-        if ev not in (None, 0) and rev_est not in (None, 0):
-            metrics["EV/Sales (FWD)"] = ev / rev_est
+        # EV / Sales TTM
+        if pd.notna(ev) and pd.notna(rev) and rev != 0:
+            results["EV/Sales (TTM)"][ticker] = ev / rev
         else:
-            metrics["EV/Sales (FWD)"] = "N/A"
+            results["EV/Sales (TTM)"][ticker] = np.nan
+
+        # EV / Sales FWD (use revenueEstimated)
+        if pd.notna(ev) and pd.notna(rev_est) and rev_est != 0:
+            results["EV/Sales (FWD)"][ticker] = ev / rev_est
+        else:
+            results["EV/Sales (FWD)"][ticker] = np.nan
 
         # EV/EBITDA TTM
-        if ev not in (None, 0) and ebitda not in (None, 0):
-            metrics["EV/EBITDA (TTM)"] = ev / ebitda
+        if pd.notna(ev) and pd.notna(ebitda) and ebitda != 0:
+            results["EV/EBITDA (TTM)"][ticker] = ev / ebitda
         else:
-            metrics["EV/EBITDA (TTM)"] = "N/A"
+            results["EV/EBITDA (TTM)"][ticker] = np.nan
 
         # EV/EBITDA FWD
-        if ev not in (None, 0) and ebitda_est not in (None, 0):
-            metrics["EV/EBITDA (FWD)"] = ev / ebitda_est
+        if pd.notna(ev) and pd.notna(ebitda_est) and ebitda_est != 0:
+            results["EV/EBITDA (FWD)"][ticker] = ev / ebitda_est
         else:
-            metrics["EV/EBITDA (FWD)"] = "N/A"
+            results["EV/EBITDA (FWD)"][ticker] = np.nan
 
-        # Price/Book
-        metrics["Price/Book (TTM)"] = pb_ttm if pb_ttm is not None else "N/A"
+        # Price / Book
+        results["Price/Book (TTM)"][ticker] = pb_ttm if not pd.isna(pb_ttm) else np.nan
 
-        # Price/Cash Flow
-        if mkt_cap not in (None, 0) and ocf not in (None, 0):
-            metrics["Price/Cash Flow (TTM)"] = mkt_cap / ocf
+        # Price / Cash Flow (TTM) using market cap vs operating cash flow
+        if pd.notna(mkt_cap) and pd.notna(ocf) and ocf != 0:
+            results["Price/Cash Flow (TTM)"][ticker] = mkt_cap / ocf
         else:
-            metrics["Price/Cash Flow (TTM)"] = "N/A"
+            results["Price/Cash Flow (TTM)"][ticker] = np.nan
 
-        # PEG (not derivable from 1y data only)
-        metrics["PEG (FWD)"] = "N/A"
-        metrics["PEG (TTM)"] = "N/A"
+        # PEG: not computed here because growth input missing; set NaN
+        results["PEG (TTM)"][ticker] = np.nan
+        results["PEG (FWD)"][ticker] = np.nan
 
-        results[ticker] = metrics
+    # prepare output table
+    tickers_present = sorted({t for t in tickers_upper if os.path.exists(os.path.join("data", f"{t}.csv"))})
+    if not tickers_present:
+        return {"tables": [("Valuation", pd.DataFrame())]}
 
-    return pd.DataFrame(results)
+    df_out = pd.DataFrame({t: {m: results[m].get(t, np.nan) for m in metrics} for t in tickers_present})
+
+    # formatted display dataframe
+    df_display = pd.DataFrame(index=metrics)
+    for col in df_out.columns:
+        formatted = []
+        for m, v in df_out[col].items():
+            # formatting: numeric ratios -> 2 decimals, missing -> "N/A"
+            if pd.isna(v):
+                formatted.append("N/A")
+            else:
+                # ratios like P/E, EV/..., P/S, Price/Book -> plain numbers
+                formatted.append(_human_plain(v, decimals=2))
+        df_display[col] = formatted
+    df_display.index = metrics
+
+    return {"tables": [("Valuation", df_display)]}
 
 # ----------------------
 # Resilient Yahoo helper (kept)

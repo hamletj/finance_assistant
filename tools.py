@@ -906,10 +906,101 @@ def compare_profitability_tool(tickers: List[str]):
 
     return {"tables": [("Profitability", df_display)]}
 
+def compare_valuation_tool(file_paths: list[str]) -> pd.DataFrame:
+    """
+    Generate a valuation comparison table across multiple tickers.
+    Auto-detects available fields, computes both TTM and Forward
+    valuation ratios, and aligns them in a table.
+
+    Parameters
+    ----------
+    file_paths : list[str]
+        List of file paths to CSVs containing financial data.
+
+    Returns
+    -------
+    pd.DataFrame
+        Comparison table with metrics as rows and tickers as columns.
+    """
+
+    results = {}
+
+    for file_path in file_paths:
+        df = pd.read_csv(file_path)
+        latest = df.iloc[-1].to_dict()
+        ticker = latest.get("symbol", os.path.basename(file_path).split(".")[0])
+
+        metrics = {}
+
+        # --- Get values if they exist ---
+        ev = latest.get("enterpriseValue", None)
+        eps = latest.get("eps", None)
+        eps_est = latest.get("epsEstimated", None)
+        rev = latest.get("revenue", None)
+        rev_est = latest.get("revenueEstimated", None)
+        ebitda = latest.get("ebitda", None)
+        ebitda_est = latest.get("ebitdaEstimated", None)
+        pe_ttm = latest.get("peratio", None)
+        ps_ttm = latest.get("priceToSalesRatio", None)
+        pb_ttm = latest.get("pbRatio", None)
+        mkt_cap = latest.get("marketCap", None)
+        ocf = latest.get("operatingCashFlow", None)
+
+        # --- Metrics ---
+        metrics["P/E GAAP (TTM)"] = pe_ttm if pe_ttm is not None else "N/A"
+        metrics["P/S (TTM)"] = ps_ttm if ps_ttm is not None else "N/A"
+
+        # Forward P/E
+        if pe_ttm not in (None, 0) and eps not in (None, 0) and eps_est not in (None, 0):
+            metrics["P/E GAAP (FWD)"] = pe_ttm * (eps / eps_est)
+        else:
+            metrics["P/E GAAP (FWD)"] = "N/A"
+
+        # EV/Sales TTM
+        if ev not in (None, 0) and rev not in (None, 0):
+            metrics["EV/Sales (TTM)"] = ev / rev
+        else:
+            metrics["EV/Sales (TTM)"] = "N/A"
+
+        # EV/Sales FWD
+        if ev not in (None, 0) and rev_est not in (None, 0):
+            metrics["EV/Sales (FWD)"] = ev / rev_est
+        else:
+            metrics["EV/Sales (FWD)"] = "N/A"
+
+        # EV/EBITDA TTM
+        if ev not in (None, 0) and ebitda not in (None, 0):
+            metrics["EV/EBITDA (TTM)"] = ev / ebitda
+        else:
+            metrics["EV/EBITDA (TTM)"] = "N/A"
+
+        # EV/EBITDA FWD
+        if ev not in (None, 0) and ebitda_est not in (None, 0):
+            metrics["EV/EBITDA (FWD)"] = ev / ebitda_est
+        else:
+            metrics["EV/EBITDA (FWD)"] = "N/A"
+
+        # Price/Book
+        metrics["Price/Book (TTM)"] = pb_ttm if pb_ttm is not None else "N/A"
+
+        # Price/Cash Flow
+        if mkt_cap not in (None, 0) and ocf not in (None, 0):
+            metrics["Price/Cash Flow (TTM)"] = mkt_cap / ocf
+        else:
+            metrics["Price/Cash Flow (TTM)"] = "N/A"
+
+        # PEG (not derivable from 1y data only)
+        metrics["PEG (FWD)"] = "N/A"
+        metrics["PEG (TTM)"] = "N/A"
+
+        results[ticker] = metrics
+
+    return pd.DataFrame(results)
 
 # ----------------------
 # Resilient Yahoo helper (kept)
 # ----------------------
+"""
 def _make_session() -> requests.Session:
     s = requests.Session()
     retry = Retry(
@@ -976,7 +1067,7 @@ def _yahoo_news_search(query: str, count: int = 5, region: str = "US", lang: str
             last_err = e
             time.sleep(random.uniform(0.5, 1.2))
     raise RuntimeError(f"Yahoo Finance news search failed after retries: {last_err}")
-
+"""
 # def finance_news_digest_tool(
 #     query: str,
 #     top_n: int = 5,

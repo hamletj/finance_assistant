@@ -12,6 +12,7 @@ from tools import (
     generate_financial_summary_tool,
     compare_growth_tool,
     compare_profitability_tool,
+    compare_valuation_tool,
 )
 
 st.set_page_config(page_title="Finance AI Assistant", page_icon="💹", layout="wide")
@@ -100,6 +101,21 @@ FUNCTIONS = [
             "required": ["tickers"],
         },
     },
+    {
+        "name": "compare_valuation_tool",
+        "description": "Compare valuation metrics across multiple tickers. The metrics include P/E, P/S etc.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "tickers": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of stock tickers, e.g., ['AAPL','MSFT','GOOG']",
+                }
+            },
+            "required": ["tickers"],
+        },
+    },
 ]
 
 SYSTEM_PROMPT = "You are a finance assistant. If it's a general question, you don't need to select a tool. Just answer. If it's a question highly related to the tools, select tools to fulfill requests."
@@ -116,6 +132,7 @@ def run_agent(user_input: str):
         "generate_financial_summary_tool": generate_financial_summary_tool,
         "compare_growth_tool": compare_growth_tool,
         "compare_profitability_tool": compare_profitability_tool,
+        "compare_valuation_tool": compare_valuation_tool,
     }
 
     resp = client.chat.completions.create(

@@ -13,6 +13,7 @@ from tools import (
     compare_growth_tool,
     compare_profitability_tool,
     compare_valuation_tool,
+    obtain_api_data_tool,
 )
 
 st.set_page_config(page_title="Finance AI Assistant", page_icon="💹", layout="wide")
@@ -26,6 +27,23 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 
 # Define the tools metadata for the LLM (add compare_growth and compare_profitability)
 FUNCTIONS = [
+    {
+        "name": "obtain_api_data_tool",
+        "description": "Fetches quarterly data for one or more tickers from FinancialModelingPrep (FMP) API, combines income statement, key metrics, and earnings calendar, saves per-ticker CSVs, and returns a concatenated DataFrame.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "tickers": {"type": "array", "items": {"type": "string"}, "description": "List of stock tickers, e.g., ['AAPL','MSFT'] or a single ticker as string."},
+                "path_to_save": {"type": "string", "description": "Directory to save per-ticker CSVs. If omitted, no files are written.", "default": None},
+                "from_date": {"type": "string", "description": "Optional 'from' date parameter (YYYY-MM-DD).", "default": None},
+                "api_key": {"type": "string", "description": "FMP API key. If omitted, uses env var FMP_API_KEY.", "default": None},
+                "max_retries": {"type": "integer", "description": "Number of retries for network requests.", "default": 3},
+                "retry_backoff": {"type": "number", "description": "Base backoff seconds (exponential backoff applied).", "default": 0.8},
+                "verbose": {"type": "boolean", "description": "Print progress messages if True.", "default": True},
+            },
+            "required": ["tickers"],
+        },
+    },
     {
         "name": "generate_financial_summary_tool",
         "description": "For a given ticker / stock, generate a table to display its quarterly key metrics.",
@@ -133,6 +151,7 @@ def run_agent(user_input: str):
         "compare_growth_tool": compare_growth_tool,
         "compare_profitability_tool": compare_profitability_tool,
         "compare_valuation_tool": compare_valuation_tool,
+        "obtain_api_data_tool": obtain_api_data_tool,
     }
 
     resp = client.chat.completions.create(

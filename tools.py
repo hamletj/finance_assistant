@@ -4,25 +4,196 @@ import re
 import time
 import random
 import tempfile
-import math
-import requests
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import os
+import ssl
+import time
+import random
+import json
+import certifi
+import pandas as pd
+import urllib.error
+from urllib.request import urlopen, Request
+from typing import List, Union, Optional
 
 from datetime import datetime, timezone, timedelta
 from pandas.tseries.offsets import DateOffset
-from typing import List, Dict, Optional
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
-from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
-from bs4 import BeautifulSoup
+from typing import List, Optional
 
 try:
     # OpenAI Python SDK v1 style optional import (used by commented news tool)
     from openai import OpenAI
 except Exception:
     OpenAI = None
+
+# ----------------------
+# Obtain API data when the data file is not present
+# ----------------------
+def obtain_api_data_tool(
+    tickers: Union[str, List[str]],
+    path_to_save: Optional[str] = 'data',
+    from_date: Optional[str] = None,
+    api_key: Optional[str] = None,
+    max_retries: int = 3,
+    retry_backoff: float = 0.8,
+    verbose: bool = True,
+) -> pd.DataFrame:
+    """
+    Fetch quarterly data for one or more tickers from FinancialModelingPrep (FMP) API,
+    combine income statement + key metrics + earnings calendar, save per-ticker CSVs
+    to `path_to_save` (if provided), and return a concatenated DataFrame.
+
+    Parameters
+    ----------
+    tickers : str or list[str]
+        Single ticker or list of tickers (e.g., "AAPL" or ["AAPL","MSFT"])
+    path_to_save : str | None
+        Directory to save per-ticker CSVs. If None, no files are written.
+    from_date : str | None
+        Optional 'from' date parameter forwarded to FMP endpoints (format: YYYY-MM-DD).
+    api_key : str | None
+        FMP API key. If None, env var FMP_API_KEY is used.
+    max_retries : int
+        Number of retries for network requests.
+    retry_backoff : float
+        Base backoff seconds (exponential backoff applied).
+    verbose : bool
+        Print progress messages if True.
+
+    Returns
+    -------
+    pd.DataFrame
+        Concatenated DataFrame of all fetched tickers (empty DataFrame if none succeeded).
+    """
+
+    # normalize tickers to list
+    if isinstance(tickers, str):
+        ticker_list = [tickers.strip().upper()]
+    else:
+        ticker_list = [t.strip().upper() for t in tickers]
+
+    # API key: prefer passed-in, otherwise env var
+    API_KEY = api_key or os.getenv("FMP_API_KEY")
+    if not API_KEY:
+        raise RuntimeError("FinancialModelingPrep API key required: pass `api_key=` or set env FMP_API_KEY")
+
+    # ensure output dir exists if saving
+    if path_to_save:
+        os.makedirs(path_to_save, exist_ok=True)
+
+    # SSL context using certifi
+    ctx = ssl.create_default_context()
+    ctx.load_verify_locations(cafile=certifi.where())
+    headers = {"User-Agent": "Mozilla/5.0"}
+
+    def _fetch_json(url: str, retries: int = max_retries) -> dict:
+        """Fetch JSON with retries and basic exponential backoff + jitter."""
+        last_exc = None
+        for attempt in range(1, retries + 1):
+            try:
+                req = Request(url, headers=headers)
+                with urlopen(req, context=ctx, timeout=30) as resp:
+                    raw = resp.read().decode("utf-8")
+                    return json.loads(raw)
+            except urllib.error.HTTPError as he:
+                # 4xx likely permanent -> raise immediately for the caller to handle
+                if 400 <= getattr(he, "code", 0) < 500:
+                    raise
+                last_exc = he
+            except Exception as e:
+                last_exc = e
+            # backoff
+            sleep_for = retry_backoff * (2 ** (attempt - 1)) + random.uniform(0.0, 0.5)
+            if verbose:
+                print(f"[obtain_api_data_tool] fetch failed (attempt {attempt}/{retries}) -> sleeping {sleep_for:.2f}s")
+            time.sleep(sleep_for)
+        raise RuntimeError(f"Failed to fetch URL after {retries} attempts. Last error: {last_exc}")
+
+    def _get_calendar(tk: str):
+        if from_date:
+            url = f"https://financialmodelingprep.com/api/v3/historical/earning_calendar/{tk}?from={from_date}&apikey={API_KEY}"
+        else:
+            url = f"https://financialmodelingprep.com/api/v3/historical/earning_calendar/{tk}?apikey={API_KEY}"
+        return _fetch_json(url)
+
+    def _get_income_statements(tk: str):
+        # endpoint supports '?period=quarter' and optional limit/from
+        if from_date:
+            url = f"https://financialmodelingprep.com/api/v3/income-statement/{tk}?from={from_date}&period=quarter&apikey={API_KEY}"
+        else:
+            url = f"https://financialmodelingprep.com/api/v3/income-statement/{tk}?period=quarter&apikey={API_KEY}"
+        return _fetch_json(url)
+
+    def _get_keymetrics(tk: str):
+        if from_date:
+            url = f"https://financialmodelingprep.com/api/v3/key-metrics/{tk}?from={from_date}&period=quarter&apikey={API_KEY}"
+        else:
+            url = f"https://financialmodelingprep.com/api/v3/key-metrics/{tk}?period=quarter&apikey={API_KEY}"
+        return _fetch_json(url)
+
+    def _combine_raw_data(tk: str, incomes_json, keymetrics_json, calendar_json) -> pd.DataFrame:
+        """
+        incomes_json, keymetrics_json, calendar_json are the raw JSON responses
+        (likely lists of dicts). Convert to DataFrames, merge sensibly.
+        """
+        # turn into DataFrames (safe fallback to empty DF)
+        df_inc = pd.DataFrame(incomes_json) if incomes_json else pd.DataFrame()
+        df_key = pd.DataFrame(keymetrics_json) if keymetrics_json else pd.DataFrame()
+        df_cal = pd.DataFrame(calendar_json) if calendar_json else pd.DataFrame()
+
+        # Clean
+        df_cal.drop(columns=['eps', 'revenue'], axis=1, inplace=True)
+        df_cal.rename(columns={'date': 'report_date'}, inplace=True)
+        # Merge
+        df = df_inc.merge(df_key, on=['date', 'symbol', 'calendarYear', 'period'], how='left')
+        df = df.merge(df_cal, left_on=['date', 'symbol'], right_on=['fiscalDateEnding', 'symbol'], how='left')
+        # Use the date in statement data as report date when report date is null
+        df.loc[df.report_date.isnull(), 'report_date'] = df.date
+        # Changae data type
+        df['report_date'] = pd.to_datetime(df['report_date'])
+
+        return df
+
+    # main loop for tickers
+    all_results = []
+    for tk in ticker_list:
+        try:
+            if verbose:
+                print(f"[obtain_api_data_tool] Fetching {tk} ...")
+            cal = _get_calendar(tk)
+            inc = _get_income_statements(tk)
+            km = _get_keymetrics(tk)
+
+            # validate shapes - API often returns dict with 'Error message' or empty lists
+            if not inc or (isinstance(inc, dict) and len(inc) == 0):
+                if verbose:
+                    print(f"[obtain_api_data_tool] income-statement returned empty for {tk}, skipping.")
+                continue
+
+            df_tk = _combine_raw_data(tk, inc, km, cal)
+
+            # Save per-ticker CSV if requested
+            if path_to_save:
+                out_fn = os.path.join(path_to_save, f"{tk}.csv")
+                try:
+                    df_tk.to_csv(out_fn, index=False)
+                    if verbose:
+                        print(f"[obtain_api_data_tool] saved {tk} -> {out_fn}")
+                except Exception as e:
+                    if verbose:
+                        print(f"[obtain_api_data_tool] Warning: could not save CSV for {tk}: {e}")
+
+            all_results.append(df_tk)
+        except Exception as e:
+            if verbose:
+                print(f"[obtain_api_data_tool] Error for {tk}: {e}. Skipping ticker.")
+
+    if not all_results:
+        return pd.DataFrame()
+    combined = pd.concat(all_results, ignore_index=True, sort=False)
+    return combined
 
 
 # ----------------------
@@ -319,9 +490,16 @@ def generate_financial_summary_tool(ticker: str, num_quarters: int = 5):
                     return orig
         return None
 
+
     path = os.path.join("data", f"{ticker.upper()}.csv")
     if not os.path.exists(path):
-        raise FileNotFoundError(path)
+        # Try to obtain data using obtain_api_data_tool
+        try:
+            obtain_api_data_tool(ticker, path_to_save="data")
+        except Exception as e:
+            raise FileNotFoundError(f"{path} (and failed to fetch via obtain_api_data_tool: {e})")
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"{path} (fetch attempted but file still missing)")
 
     df = pd.read_csv(path)
     # filter by symbol column if present
@@ -623,6 +801,14 @@ def compare_growth_tool(tickers: List[str]):
     results = {m: {} for m in metrics}
     tickers_upper = [t.strip().upper() for t in tickers]
 
+    # Ensure all required data files exist, fetch if missing
+    missing = [t for t in tickers_upper if not os.path.exists(os.path.join("data", f"{t}.csv"))]
+    if missing:
+        try:
+            obtain_api_data_tool(missing, path_to_save="data")
+        except Exception as e:
+            pass  # If fetch fails, will skip those tickers below
+
     for ticker in tickers_upper:
         path = os.path.join("data", f"{ticker}.csv")
         if not os.path.exists(path):
@@ -792,6 +978,14 @@ def compare_profitability_tool(tickers: List[str]):
     results = {m: {} for m in metrics}
     tickers_upper = [t.strip().upper() for t in tickers]
 
+    # Ensure all required data files exist, fetch if missing
+    missing = [t for t in tickers_upper if not os.path.exists(os.path.join("data", f"{t}.csv"))]
+    if missing:
+        try:
+            obtain_api_data_tool(missing, path_to_save="data")
+        except Exception as e:
+            pass  # If fetch fails, will skip those tickers below
+
     for ticker in tickers_upper:
         path = os.path.join("data", f"{ticker}.csv")
         if not os.path.exists(path):
@@ -930,6 +1124,14 @@ def compare_valuation_tool(tickers: List[str]):
 
     results = {m: {} for m in metrics}
     tickers_upper = [t.strip().upper() for t in tickers]
+
+    # Ensure all required data files exist, fetch if missing
+    missing = [t for t in tickers_upper if not os.path.exists(os.path.join("data", f"{t}.csv"))]
+    if missing:
+        try:
+            obtain_api_data_tool(missing, path_to_save="data")
+        except Exception as e:
+            pass  # If fetch fails, will skip those tickers below
 
     for ticker in tickers_upper:
         path = os.path.join("data", f"{ticker}.csv")

@@ -36,7 +36,7 @@ FUNCTIONS = [
                 "tickers": {"type": "array", "items": {"type": "string"}, "description": "List of stock tickers, e.g., ['AAPL','MSFT'] or a single ticker as string."},
                 "path_to_save": {"type": "string", "description": "Directory to save per-ticker CSVs. If omitted, no files are written.", "default": None},
                 "from_date": {"type": "string", "description": "Optional 'from' date parameter (YYYY-MM-DD).", "default": None},
-                "api_key": {"type": "string", "description": "FMP API key. If omitted, uses env var FMP_API_KEY.", "default": FMP_API_KEY},
+                "api_key": {"type": "string", "description": "FMP API key. If omitted, uses env var FMP_API_KEY.", "default": None},
                 "max_retries": {"type": "integer", "description": "Number of retries for network requests.", "default": 3},
                 "retry_backoff": {"type": "number", "description": "Base backoff seconds (exponential backoff applied).", "default": 0.8},
                 "verbose": {"type": "boolean", "description": "Print progress messages if True.", "default": True},

@@ -168,8 +168,17 @@ def run_agent(user_input: str):
         "compare_profitability_tool": compare_profitability_tool,
         "compare_valuation_tool": compare_valuation_tool,
         "obtain_api_data_tool": obtain_api_data_tool,
-        "obtain_earnings_transcript_tool": obtain_earnings_transcript_tool,
     }
+    # Try to dynamically attach the earnings transcript tool if available (avoid ImportError at module import time)
+    try:
+        from importlib import import_module
+        tools_mod = import_module("tools")
+        eet = getattr(tools_mod, "obtain_earnings_transcript_tool", None)
+        if eet:
+            tool_registry["obtain_earnings_transcript_tool"] = eet
+    except Exception:
+        # ignore; tool simply won't be available at runtime
+        pass
 
     resp = client.chat.completions.create(
         model="gpt-5-mini",  # keep your chosen model

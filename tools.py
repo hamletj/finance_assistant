@@ -195,6 +195,85 @@ def obtain_api_data_tool(
     combined = pd.concat(all_results, ignore_index=True, sort=False)
     return combined
 
+# ----------------------
+# Earnings transcript tool (FinancialModelingPrep)
+# ----------------------
+def obtain_earnings_transcript_tool(
+    ticker: str,
+    year: int,
+    quarter: int,
+    api_key: Optional[str] = None,
+    save_to: Optional[str] = None,
+    max_retries: int = 3,
+    retry_backoff: float = 0.8,
+    verbose: bool = True,
+) -> dict:
+    """
+    Fetch earnings call transcript JSON for a given ticker/year/quarter from FinancialModelingPrep.
+
+    Parameters
+    ----------
+    ticker: stock ticker (e.g., 'AAPL')
+    year: full year integer (e.g., 2024)
+    quarter: quarter number 1-4
+    api_key: optional FMP API key (defaults to env FMP_API_KEY)
+    save_to: optional path to save the JSON (directory). If provided, will write {ticker}_{year}Q{quarter}_transcript.json
+    max_retries, retry_backoff, verbose: retry/backoff controls
+
+    Returns
+    -------
+    dict: parsed JSON response from the endpoint, or raises RuntimeError on permanent failure.
+    """
+    if not isinstance(ticker, str):
+        raise ValueError("ticker must be a string")
+    tk = ticker.strip().upper()
+    API_KEY = api_key or os.getenv("FMP_API_KEY")
+    if not API_KEY:
+        raise RuntimeError("FinancialModelingPrep API key required: pass api_key= or set env FMP_API_KEY")
+
+    if quarter not in (1, 2, 3, 4):
+        raise ValueError("quarter must be 1,2,3, or 4")
+
+    url = f"https://financialmodelingprep.com/stable/earning-call-transcript?symbol={tk}&year={int(year)}&quarter={int(quarter)}&apikey={API_KEY}"
+
+    # simple retry loop
+    last_exc = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            req = Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            ctx = ssl.create_default_context()
+            ctx.load_verify_locations(cafile=certifi.where())
+            with urlopen(req, context=ctx, timeout=30) as resp:
+                raw = resp.read().decode("utf-8")
+                data = json.loads(raw)
+                # save if requested
+                if save_to:
+                    try:
+                        os.makedirs(save_to, exist_ok=True)
+                        out_fn = os.path.join(save_to, f"{tk}_{year}Q{quarter}_transcript.json")
+                        with open(out_fn, "w", encoding="utf-8") as f:
+                            json.dump(data, f, ensure_ascii=False, indent=2)
+                        if verbose:
+                            print(f"[obtain_earnings_transcript_tool] saved transcript -> {out_fn}")
+                    except Exception as e:
+                        if verbose:
+                            print(f"[obtain_earnings_transcript_tool] warning: could not save file: {e}")
+                return data
+        except urllib.error.HTTPError as he:
+            # 4xx likely permanent
+            if 400 <= getattr(he, "code", 0) < 500:
+                raise
+            last_exc = he
+        except Exception as e:
+            last_exc = e
+
+        # backoff
+        sleep_for = retry_backoff * (2 ** (attempt - 1)) + random.uniform(0.0, 0.5)
+        if verbose:
+            print(f"[obtain_earnings_transcript_tool] attempt {attempt} failed -> sleeping {sleep_for:.2f}s")
+        time.sleep(sleep_for)
+
+    raise RuntimeError(f"Failed to fetch earnings transcript after {max_retries} attempts. Last error: {last_exc}")
 
 # ----------------------
 # Shared parsing & formatting helpers
@@ -294,7 +373,6 @@ def _cagr(start, end, years):
         return (end / start) ** (1.0 / years) - 1.0
     except Exception:
         return np.nan
-
 
 # ----------------------
 # Existing finance tools (kept largely intact)

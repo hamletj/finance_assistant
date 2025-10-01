@@ -14,6 +14,7 @@ from tools import (
     compare_profitability_tool,
     compare_valuation_tool,
     obtain_api_data_tool,
+    obtain_earnings_transcript_tool,
 )
 
 st.set_page_config(page_title="Finance AI Assistant", page_icon="💹", layout="wide")
@@ -134,6 +135,21 @@ FUNCTIONS = [
             "required": ["tickers"],
         },
     },
+    {
+        "name": "obtain_earnings_transcript_tool",
+        "description": "Fetches earnings call transcript JSON for a given ticker, year, and quarter from FinancialModelingPrep.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "ticker": {"type": "string", "description": "Stock ticker, e.g., AAPL"},
+                "year": {"type": "integer", "description": "Full year, e.g., 2024"},
+                "quarter": {"type": "integer", "description": "Quarter number 1-4"},
+                "api_key": {"type": "string", "description": "Optional FMP API key to override env var", "default": None},
+                "save_to": {"type": "string", "description": "Optional directory to save JSON", "default": None},
+            },
+            "required": ["ticker", "year", "quarter"],
+        },
+    },
 ]
 
 SYSTEM_PROMPT = "You are a finance assistant. If it's a general question, you don't need to select a tool. Just answer. If it's a question highly related to the tools, select tools to fulfill requests."
@@ -152,6 +168,7 @@ def run_agent(user_input: str):
         "compare_profitability_tool": compare_profitability_tool,
         "compare_valuation_tool": compare_valuation_tool,
         "obtain_api_data_tool": obtain_api_data_tool,
+        "obtain_earnings_transcript_tool": obtain_earnings_transcript_tool,
     }
 
     resp = client.chat.completions.create(

@@ -22,11 +22,42 @@ from datetime import datetime, timezone, timedelta
 from pandas.tseries.offsets import DateOffset
 from typing import List, Optional
 
-try:
-    # OpenAI Python SDK v1 style optional import (used by commented news tool)
-    from openai import OpenAI
-except Exception:
-    OpenAI = None
+from openai import OpenAI
+
+# ----------------------
+# FMP API helpers
+# ----------------------
+
+FMP_API_KEY = os.getenv("FMP_API_KEY")
+if not FMP_API_KEY:
+    raise RuntimeError("FinancialModelingPrep API key required: pass `api_key=` or set env FMP_API_KEY")
+    
+def _fetch_json(url: str, retries: int = 3, retry_backoff: float = 0.8, verbose: bool = True) -> dict:
+    """Fetch JSON with retries and basic exponential backoff + jitter."""
+    # SSL context using certifi
+    ctx = ssl.create_default_context()
+    ctx.load_verify_locations(cafile=certifi.where())
+    headers = {"User-Agent": "Mozilla/5.0"}
+    last_exc = None
+    for attempt in range(1, retries + 1):
+        try:
+            req = Request(url, headers=headers)
+            with urlopen(req, context=ctx, timeout=30) as resp:
+                raw = resp.read().decode("utf-8")
+                return json.loads(raw)
+        except urllib.error.HTTPError as he:
+            # 4xx likely permanent -> raise immediately for the caller to handle
+            if 400 <= getattr(he, "code", 0) < 500:
+                raise
+            last_exc = he
+        except Exception as e:
+            last_exc = e
+        # backoff
+        sleep_for = retry_backoff * (2 ** (attempt - 1)) + random.uniform(0.0, 0.5)
+        if verbose:
+            print(f"[obtain_api_data_tool] fetch failed (attempt {attempt}/{retries}) -> sleeping {sleep_for:.2f}s")
+        time.sleep(sleep_for)
+    raise RuntimeError(f"Failed to fetch URL after {retries} attempts. Last error: {last_exc}")
 
 # ----------------------
 # Obtain API data when the data file is not present
@@ -35,9 +66,6 @@ def obtain_api_data_tool(
     tickers: Union[str, List[str]],
     path_to_save: Optional[str] = 'data',
     from_date: Optional[str] = None,
-    api_key: Optional[str] = None,
-    max_retries: int = 3,
-    retry_backoff: float = 0.8,
     verbose: bool = True,
 ) -> pd.DataFrame:
     """
@@ -74,63 +102,30 @@ def obtain_api_data_tool(
     else:
         ticker_list = [t.strip().upper() for t in tickers]
 
-    # API key: prefer passed-in, otherwise env var
-    API_KEY = api_key or os.getenv("FMP_API_KEY")
-    if not API_KEY:
-        raise RuntimeError("FinancialModelingPrep API key required: pass `api_key=` or set env FMP_API_KEY")
-
     # ensure output dir exists if saving
     if path_to_save:
         os.makedirs(path_to_save, exist_ok=True)
 
-    # SSL context using certifi
-    ctx = ssl.create_default_context()
-    ctx.load_verify_locations(cafile=certifi.where())
-    headers = {"User-Agent": "Mozilla/5.0"}
-
-    def _fetch_json(url: str, retries: int = max_retries) -> dict:
-        """Fetch JSON with retries and basic exponential backoff + jitter."""
-        last_exc = None
-        for attempt in range(1, retries + 1):
-            try:
-                req = Request(url, headers=headers)
-                with urlopen(req, context=ctx, timeout=30) as resp:
-                    raw = resp.read().decode("utf-8")
-                    return json.loads(raw)
-            except urllib.error.HTTPError as he:
-                # 4xx likely permanent -> raise immediately for the caller to handle
-                if 400 <= getattr(he, "code", 0) < 500:
-                    raise
-                last_exc = he
-            except Exception as e:
-                last_exc = e
-            # backoff
-            sleep_for = retry_backoff * (2 ** (attempt - 1)) + random.uniform(0.0, 0.5)
-            if verbose:
-                print(f"[obtain_api_data_tool] fetch failed (attempt {attempt}/{retries}) -> sleeping {sleep_for:.2f}s")
-            time.sleep(sleep_for)
-        raise RuntimeError(f"Failed to fetch URL after {retries} attempts. Last error: {last_exc}")
-
     def _get_calendar(tk: str):
         if from_date:
-            url = f"https://financialmodelingprep.com/api/v3/historical/earning_calendar/{tk}?from={from_date}&apikey={API_KEY}"
+            url = f"https://financialmodelingprep.com/api/v3/historical/earning_calendar/{tk}?from={from_date}&apikey={FMP_API_KEY}"
         else:
-            url = f"https://financialmodelingprep.com/api/v3/historical/earning_calendar/{tk}?apikey={API_KEY}"
+            url = f"https://financialmodelingprep.com/api/v3/historical/earning_calendar/{tk}?apikey={FMP_API_KEY}"
         return _fetch_json(url)
 
     def _get_income_statements(tk: str):
         # endpoint supports '?period=quarter' and optional limit/from
         if from_date:
-            url = f"https://financialmodelingprep.com/api/v3/income-statement/{tk}?from={from_date}&period=quarter&apikey={API_KEY}"
+            url = f"https://financialmodelingprep.com/api/v3/income-statement/{tk}?from={from_date}&period=quarter&apikey={FMP_API_KEY}"
         else:
-            url = f"https://financialmodelingprep.com/api/v3/income-statement/{tk}?period=quarter&apikey={API_KEY}"
+            url = f"https://financialmodelingprep.com/api/v3/income-statement/{tk}?period=quarter&apikey={FMP_API_KEY}"
         return _fetch_json(url)
 
     def _get_keymetrics(tk: str):
         if from_date:
-            url = f"https://financialmodelingprep.com/api/v3/key-metrics/{tk}?from={from_date}&period=quarter&apikey={API_KEY}"
+            url = f"https://financialmodelingprep.com/api/v3/key-metrics/{tk}?from={from_date}&period=quarter&apikey={FMP_API_KEY}"
         else:
-            url = f"https://financialmodelingprep.com/api/v3/key-metrics/{tk}?period=quarter&apikey={API_KEY}"
+            url = f"https://financialmodelingprep.com/api/v3/key-metrics/{tk}?period=quarter&apikey={FMP_API_KEY}"
         return _fetch_json(url)
 
     def _combine_raw_data(tk: str, incomes_json, keymetrics_json, calendar_json) -> pd.DataFrame:

@@ -28,6 +28,23 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 # Define the tools metadata for the LLM (add compare_growth and compare_profitability)
 FUNCTIONS = [
     {
+        "name": "company_intro",
+        "description": "Generate an investor-focused company brief from model knowledge (no external fetch). Trigger when user asks to introduce/overview a company.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "company": {"type": "string", "description": "Company name or ticker (if ticker, treat it as the company)."},
+                "focus": {
+                    "type": "string",
+                    "enum": ["investment"],
+                    "description": "Keep output strictly investment-relevant.",
+                    "default": "investment"
+                }
+            },
+            "required": ["company"]
+        }
+    },
+    {
         "name": "obtain_api_data_tool",
         "description": "Fetches quarterly data for one or more tickers from FinancialModelingPrep (FMP) API, combines income statement, key metrics, and earnings calendar, saves per-ticker CSVs, and returns a concatenated DataFrame.",
         "parameters": {
@@ -136,7 +153,17 @@ FUNCTIONS = [
     },
 ]
 
-SYSTEM_PROMPT = "You are a finance assistant. If it's a general question, you don't need to select a tool. Just answer. If it's a question highly related to the tools, select tools to fulfill requests."
+SYSTEM_PROMPT = """You are a finance assistant.
+
+ROUTING:
+- If the user asks to introduce/overview a company (e.g., "introduce {company}", "what does {company} do", "investor summary of {company}"), call the tool `company_intro` with {"company": "..."}.
+- Otherwise, if a question maps to a concrete data/plot comparison, use the appropriate tool.
+- If it's a general finance question, answer directly without tools.
+
+STYLE FOR company_intro EXECUTION (handled internally by assistant):
+- Output must be concise and investment-relevant only; exclude trivia.
+"""
+
 
 def run_agent(user_input: str):
     messages = [

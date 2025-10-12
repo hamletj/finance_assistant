@@ -192,7 +192,7 @@ def _execute_company_intro(company: str):
             {"role": "system", "content": "You output compact, investment-grade briefs in valid JSON only."},
             {"role": "user", "content": prompt},
         ],
-        temperature=0.2,
+        temperature=1,
     )
     content = (resp.choices[0].message.content or "").strip()
 

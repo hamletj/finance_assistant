@@ -280,69 +280,122 @@ def _build_messages(user_text: str):
     return [{"role": "system", "content": _build_system_prompt()}, *history, {"role": "user", "content": user_text}]
 
 def run_agent(user_input: str):
-    _summarize_history_if_needed(client)  # condense long threads
+    _summarize_history_if_needed(client)  # condense long threads when needed
     messages = _build_messages(user_input)
-    print(messages)
-
-    tool_registry = {
-        "past_history_tool": past_history_tool,
-        "moving_average_tool": moving_average_tool,
-        "generate_financial_summary_tool": generate_financial_summary_tool,
-        "compare_growth_tool": compare_growth_tool,
-        "compare_profitability_tool": compare_profitability_tool,
-        "compare_valuation_tool": compare_valuation_tool,
-        "obtain_api_data_tool": obtain_api_data_tool,
-    }
-    # Try to dynamically attach the earnings transcript tool if available (avoid ImportError at module import time)
-    try:
-        from importlib import import_module
-        tools_mod = import_module("tools")
-        eet = getattr(tools_mod, "obtain_earnings_transcript_tool", None)
-        if eet:
-            tool_registry["obtain_earnings_transcript_tool"] = eet
-    except Exception:
-        # ignore; tool simply won't be available at runtime
-        pass
 
     resp = client.chat.completions.create(
-        model="gpt-5-mini",  
+        model="gpt-5-mini",
         messages=messages,
         functions=FUNCTIONS,
         function_call="auto",
     )
-
     message = resp.choices[0].message
 
+    # ---------- TOOL PATH ----------
     if getattr(message, "function_call", None):
         name = message.function_call.name
         raw_args = message.function_call.arguments or "{}"
-
         try:
             args = json.loads(raw_args)
         except json.JSONDecodeError:
+            # record to LLM history so next turn has continuity
+            st.session_state.chat_messages.extend([
+                {"role": "user", "content": user_input},
+                {"role": "assistant", "content": f"Could not parse tool arguments for {name}."},
+            ])
             return {"text": f"Could not parse tool arguments for {name}: {raw_args}"}
-        
+
         if name == "company_intro":
             company = (args.get("company") or "").strip()
             if not company:
+                st.session_state.chat_messages.extend([
+                    {"role": "user", "content": user_input},
+                    {"role": "assistant", "content": "Please specify a company name or ticker."},
+                ])
                 return {"text": "Please specify a company name or ticker."}
-            return _execute_company_intro(company)
+
+            result = _execute_company_intro(company)
+
+            # ---- update memory + history
+            ci = result.get("company_intro") or {}
+            resolved_company = (ci.get("company") or company).strip()
+            if resolved_company:
+                st.session_state.mem["last_company"] = resolved_company
+
+            # keep the assistant’s turn short in the LLM history
+            st.session_state.chat_messages.extend([
+                {"role": "user", "content": user_input},
+                {"role": "assistant", "content": f"Investor brief for {resolved_company}."},
+            ])
+            return result
+
+        # ---- real tools
+        tool_registry = {
+            "past_history_tool": past_history_tool,
+            "moving_average_tool": moving_average_tool,
+            "generate_financial_summary_tool": generate_financial_summary_tool,
+            "compare_growth_tool": compare_growth_tool,
+            "compare_profitability_tool": compare_profitability_tool,
+            "compare_valuation_tool": compare_valuation_tool,
+            "obtain_api_data_tool": obtain_api_data_tool,
+        }
+        try:
+            from importlib import import_module
+            tools_mod = import_module("tools")
+            eet = getattr(tools_mod, "obtain_earnings_transcript_tool", None)
+            if eet:
+                tool_registry["obtain_earnings_transcript_tool"] = eet
+        except Exception:
+            pass
 
         tool_fn = tool_registry.get(name)
         if tool_fn is None:
+            st.session_state.chat_messages.extend([
+                {"role": "user", "content": user_input},
+                {"role": "assistant", "content": f"Unknown tool requested: {name}"},
+            ])
             return {"text": f"Unknown tool requested: {name}"}
 
         try:
             tool_result = tool_fn(**args)
         except TypeError as e:
+            st.session_state.chat_messages.extend([
+                {"role": "user", "content": user_input},
+                {"role": "assistant", "content": f"Invalid arguments for {name}: {e}"},
+            ])
             return {"text": f"Invalid arguments for {name}: {e}"}
         except Exception as e:
+            st.session_state.chat_messages.extend([
+                {"role": "user", "content": user_input},
+                {"role": "assistant", "content": f"Error running {name}: {e}"},
+            ])
             return {"text": f"Error running {name}: {e}"}
 
+        # ---- memory from tool args (optional but handy)
+        if isinstance(args.get("tickers"), list):
+            st.session_state.mem["last_tickers"] = [t.strip().upper() for t in args["tickers"]]
+            if len(st.session_state.mem["last_tickers"]) == 1:
+                st.session_state.mem["last_company"] = st.session_state.mem["last_tickers"][0]
+
+        # short assistant summary into history
+        short = f"{name} executed."
+        if st.session_state.mem.get("last_tickers"):
+            short = f"{name} executed for {', '.join(st.session_state.mem['last_tickers'])}."
+        st.session_state.chat_messages.extend([
+            {"role": "user", "content": user_input},
+            {"role": "assistant", "content": short},
+        ])
         return tool_result
 
-    return {"text": (message.content or "").strip()}
+    # ---------- NO-TOOL PATH ----------
+    text = (message.content or "").strip()
 
+    # write both sides to history so next turn has context
+    st.session_state.chat_messages.extend([
+        {"role": "user", "content": user_input},
+        {"role": "assistant", "content": text},
+    ])
+    return {"text": text}
 
 # ---------------- Streamlit UI ----------------
 st.title("💹 Finance AI Assistant — Tool-enabled")
@@ -395,7 +448,7 @@ for chat in st.session_state.history:
                     seg_df = pd.DataFrame(segs)
                     # keep just common cols if present
                     cols = [c for c in ["name","how_they_make_money","rev_mix_estimate"] if c in seg_df.columns]
-                    st.dataframe(seg_df[cols] if cols else seg_df, use_container_width=True)
+                    st.dataframe(seg_df[cols] if cols else seg_df, width=True)
                 except Exception:
                     st.write(segs)
 

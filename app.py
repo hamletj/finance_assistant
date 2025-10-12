@@ -282,6 +282,7 @@ def _build_messages(user_text: str):
 def run_agent(user_input: str):
     _summarize_history_if_needed(client)  # condense long threads
     messages = _build_messages(user_input)
+    print(messages)
 
     tool_registry = {
         "past_history_tool": past_history_tool,

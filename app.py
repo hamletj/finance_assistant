@@ -18,6 +18,16 @@ from tools import (
 
 st.set_page_config(page_title="Finance AI Assistant", page_icon="💹", layout="wide")
 
+if "chat_messages" not in st.session_state:
+    st.session_state.chat_messages = []   # [{"role":"user"/"assistant","content":str}, ...]
+
+if "mem" not in st.session_state:
+    st.session_state.mem = {
+        "summary": "",          # rolling brief summary of earlier turns
+        "last_company": None,   # lightweight entity memory
+        "last_tickers": []      # optional: for compare tools, etc.
+    }
+
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
     st.error("Please set your OPENAI_API_KEY as an environment variable.")
@@ -153,17 +163,7 @@ FUNCTIONS = [
     },
 ]
 
-SYSTEM_PROMPT = """You are a finance assistant.
-
-ROUTING:
-- If the user asks to introduce/overview a company (e.g., "introduce {company}", "what does {company} do", "investor summary of {company}"), call the tool `company_intro` with {"company": "..."}.
-- Otherwise, if a question maps to a concrete data/plot comparison, use the appropriate tool.
-- If it's a general finance question, answer directly without tools.
-
-STYLE FOR company_intro EXECUTION (handled internally by assistant):
-- Output must be concise and investment-relevant only; exclude trivia.
-"""
-
+# ---------------- Helper Functions ----------------
 def _execute_company_intro(company: str):
     prompt = f"""
         You are an investment analyst.
@@ -208,11 +208,80 @@ def _execute_company_intro(company: str):
         }
     return {"company_intro": data, "text": f"Investor brief for {company}"}
 
+def _prepend_coref_hint(user_text: str) -> str:
+    last = st.session_state.mem.get("last_company")
+    if not last:
+        return user_text
+    low = f" {user_text.lower()} "
+    if (" it " in low or " its " in low or " they " in low or " their " in low) and last.lower() not in low:
+        return f"(Context: pronouns refer to {last}.) {user_text}"
+    return user_text
+
+def _trim_history(msgs, max_pairs=8):
+    # keep last N user/assistant exchanges (system prompt is added later)
+    return msgs[-max_pairs*2:]
+
+def _summarize_history_if_needed(client):
+    # If history gets long, summarize older turns into mem["summary"] and keep a small tail.
+    msgs = st.session_state.chat_messages
+    if len(msgs) <= 20:   # tune threshold as you like
+        return
+    # Summarize everything except the last 6 messages
+    older = msgs[:-6]
+    text_block = "\n".join(f"{m['role']}: {m['content']}" for m in older)
+    prompt = (
+        "Summarize the prior conversation into a brief, reusable memory for future turns. "
+        "Keep entities (companies, tickers), user goals, and assumptions. 6-8 lines max."
+        f"\n\nConversation:\n{text_block}"
+    )
+    try:
+        r = client.chat.completions.create(
+            model="gpt-5-nano",
+            messages=[
+                {"role": "system", "content": "Output only the summary text."},
+                {"role": "user", "content": prompt},
+            ],
+        )
+        st.session_state.mem["summary"] = (r.choices[0].message.content or "").strip()
+    except Exception:
+        pass
+    # keep only a small tail for recency; older turns now live in mem["summary"]
+    st.session_state.chat_messages = msgs[-6:]
+
+# ---------------- Agent Logic ----------------
+# Define the system prompt with routing instructions
+
+SYSTEM_PROMPT_BASE = """You are a finance assistant.
+
+ROUTING:
+- If the user asks to introduce/overview a company (e.g., "introduce {company}", "what does {company} do", "investor summary of {company}"), call the tool `company_intro` with {"company": "..."}.
+- Otherwise, if a question maps to a concrete data/plot comparison, use the appropriate tool.
+- If it's a general finance question, answer directly without tools.
+
+STYLE FOR company_intro EXECUTION (handled internally by assistant):
+- Output must be concise and investment-relevant only; exclude trivia.
+"""
+
+def _build_system_prompt():
+    mem = st.session_state.mem
+    memo = "\nCONTEXT MEMORY:\n"
+    if mem.get("summary"):
+        memo += f"- Summary: {mem['summary']}\n"
+    if mem.get("last_company"):
+        memo += f"- Last discussed company: {mem['last_company']}\n"
+    if mem.get("last_tickers"):
+        memo += f"- Last tickers referenced: {', '.join(mem['last_tickers'])}\n"
+    return SYSTEM_PROMPT_BASE + memo
+
+def _build_messages(user_text: str):
+    # add pronoun/coref hint inline to the user text
+    user_text = _prepend_coref_hint(user_text)
+    history = _trim_history(st.session_state.chat_messages)
+    return [{"role": "system", "content": _build_system_prompt()}, *history, {"role": "user", "content": user_text}]
+
 def run_agent(user_input: str):
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": user_input},
-    ]
+    _summarize_history_if_needed(client)  # condense long threads
+    messages = _build_messages(user_input)
 
     tool_registry = {
         "past_history_tool": past_history_tool,

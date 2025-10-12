@@ -164,6 +164,50 @@ STYLE FOR company_intro EXECUTION (handled internally by assistant):
 - Output must be concise and investment-relevant only; exclude trivia.
 """
 
+def _execute_company_intro(company: str):
+    prompt = f"""
+        You are an investment analyst.
+
+        Produce a concise, investment-focused brief for "{company}".
+        Return JSON with exactly these keys:
+        company, history, founders, ceo, segments, competitors, investor_takeaways
+        Where:
+        - history: 2–4 sentences
+        - founders: array of strings
+        - ceo: string (include "since YYYY" if known/likely)
+        - segments: array of objects: name, how_they_make_money, rev_mix_estimate (optional)
+        - competitors: array of strings
+        - investor_takeaways: object with keys:
+        moat, growth_drivers (array), unit_economics, margins_fcf, capex_intensity,
+        risks (array), kpis_to_watch (array)
+        Rules:
+        - Strictly investment-relevant; omit trivia.
+        - If uncertain, include a short "needs_verification" note inline.
+        Return only valid JSON.
+        """.strip()
+
+    resp = client.chat.completions.create(
+        model="gpt-5-mini",
+        messages=[
+            {"role": "system", "content": "You output compact, investment-grade briefs in valid JSON only."},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.2,
+    )
+    content = (resp.choices[0].message.content or "").strip()
+
+    # minimal defensive parsing
+    try:
+        data = json.loads(content)
+    except json.JSONDecodeError:
+        s, e = content.find("{"), content.rfind("}")
+        data = json.loads(content[s:e+1]) if s != -1 and e != -1 and e > s else {
+            "company": company, "history": "", "founders": [], "ceo": "",
+            "segments": [], "competitors": [],
+            "investor_takeaways": {"moat":"","growth_drivers":[],"unit_economics":"",
+                                   "margins_fcf":"","capex_intensity":"","risks":[],"kpis_to_watch":[]}
+        }
+    return {"company_intro": data, "text": f"Investor brief for {company}"}
 
 def run_agent(user_input: str):
     messages = [
@@ -192,7 +236,7 @@ def run_agent(user_input: str):
         pass
 
     resp = client.chat.completions.create(
-        model="gpt-5-mini",  # keep your chosen model
+        model="gpt-5-mini",  
         messages=messages,
         functions=FUNCTIONS,
         function_call="auto",
@@ -208,6 +252,12 @@ def run_agent(user_input: str):
             args = json.loads(raw_args)
         except json.JSONDecodeError:
             return {"text": f"Could not parse tool arguments for {name}: {raw_args}"}
+        
+        if name == "company_intro":
+            company = (args.get("company") or "").strip()
+            if not company:
+                return {"text": "Please specify a company name or ticker."}
+            return _execute_company_intro(company)
 
         tool_fn = tool_registry.get(name)
         if tool_fn is None:

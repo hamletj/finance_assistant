@@ -191,8 +191,7 @@ def _execute_company_intro(company: str):
         messages=[
             {"role": "system", "content": "You output compact, investment-grade briefs in valid JSON only."},
             {"role": "user", "content": prompt},
-        ],
-        temperature=1,
+        ]
     )
     content = (resp.choices[0].message.content or "").strip()
 
@@ -302,6 +301,49 @@ for chat in st.session_state.history:
         # 1) plain text (if any)
         if chat.get("text"):
             st.write(chat["text"])
+        
+        # --- render company intro JSON ---
+        ci = chat.get("company_intro")
+        if ci:
+            st.subheader(ci.get("company", "Company"))
+
+            st.markdown("### History & Founders")
+            if ci.get("history"):
+                st.write(ci["history"])
+            founders = ci.get("founders") or []
+            if founders:
+                st.write("- **Founders:** " + ", ".join(founders))
+
+            st.markdown("### Leadership")
+            if ci.get("ceo"):
+                st.write(f"**CEO:** {ci['ceo']}")
+
+            segs = ci.get("segments") or []
+            if segs:
+                st.markdown("### Segments")
+                try:
+                    seg_df = pd.DataFrame(segs)
+                    # keep just common cols if present
+                    cols = [c for c in ["name","how_they_make_money","rev_mix_estimate"] if c in seg_df.columns]
+                    st.dataframe(seg_df[cols] if cols else seg_df, use_container_width=True)
+                except Exception:
+                    st.write(segs)
+
+            comps = ci.get("competitors") or []
+            if comps:
+                st.markdown("### Competitors")
+                st.write(", ".join(comps))
+
+            it = ci.get("investor_takeaways") or {}
+            if it:
+                st.markdown("### Investor Takeaways")
+                if it.get("moat"): st.write(f"**Moat:** {it['moat']}")
+                if it.get("growth_drivers"): st.write("**Growth drivers:** " + ", ".join(it["growth_drivers"]))
+                if it.get("unit_economics"): st.write(f"**Unit economics:** {it['unit_economics']}")
+                if it.get("margins_fcf"): st.write(f"**Margins/FCF:** {it['margins_fcf']}")
+                if it.get("capex_intensity"): st.write(f"**Capex intensity:** {it['capex_intensity']}")
+                if it.get("risks"): st.write("**Risks:** " + ", ".join(it["risks"]))
+                if it.get("kpis_to_watch"): st.write("**KPIs:** " + ", ".join(it["kpis_to_watch"]))
 
         # 2) formatted financial summary (existing)
         pivot_display = chat.get("pivot_display")

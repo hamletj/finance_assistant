@@ -331,7 +331,7 @@ def _interval_to_timedelta(interval: str) -> timedelta:
     return timedelta(days=1)
 
 
-def moving_average_tool(ticker: str, period: str = "1y", interval: str = "1d", windows=(20,)):
+def moving_average_tool(ticker: str, period: str = "1y", interval: str = "1d", windows=(20, 60, 100, 200)):
     ticker = ticker.strip().upper()
     result = {"text": "", "image_path": None}
 

@@ -107,10 +107,10 @@ FUNCTIONS = [
                 "interval": {"type": "string", "description": "e.g., '1d', '1wk', '1h'"},
                 "windows": {
                     "type": "array",
-                    "description": "SMA window sizes in periods (integers > 1), e.g., [5, 20, 50].",
+                    "description": "SMA window sizes in periods (integers > 1), e.g., [20, 60, 100, 200].",
                     "items": {"type": "integer", "minimum": 2},
                     "minItems": 1,
-                    "default": [20],
+                    "default": [20, 60, 100, 200],
                 },
             },
             "required": ["ticker"],
